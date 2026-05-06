@@ -1,0 +1,69 @@
+"""Atomic JSON persistence for the bot state."""
+
+import json
+
+import pytest
+
+from tradingagents.solana_bot.risk import DailyLossTracker
+from tradingagents.solana_bot.state import BotState
+from tradingagents.solana_bot.trade import OpenTrade
+
+pytestmark = pytest.mark.unit
+
+
+def _open_trade():
+    return OpenTrade.open_long(
+        entry=100.0,
+        atr_value=2.0,
+        size=10.0,
+        atr_mult=1.5,
+        tp1_r=1.0,
+        tp2_r=2.0,
+        tp1_close_fraction=0.5,
+        tp2_close_fraction=0.25,
+        trail_atr_mult=1.5,
+    )
+
+
+def test_save_then_load_round_trip(tmp_path):
+    path = tmp_path / "state.json"
+    state = BotState(path=path, open_trade=_open_trade(), last_candle_ts=42)
+    state.tracker = DailyLossTracker(starting_balance=10_000)
+    state.tracker.record_pnl(-50)
+    state.save()
+
+    loaded = BotState.load(path)
+    assert loaded.has_open_trade()
+    assert loaded.last_candle_ts == 42
+    assert loaded.tracker is not None
+    assert loaded.tracker.today_pnl == -50
+
+
+def test_load_missing_file_returns_empty_state(tmp_path):
+    path = tmp_path / "no-such-state.json"
+    loaded = BotState.load(path)
+    assert loaded.path == path
+    assert loaded.open_trade is None
+    assert not loaded.has_open_trade()
+
+
+def test_save_is_atomic(tmp_path):
+    """No leftover tempfiles should be visible in the destination dir after save."""
+    path = tmp_path / "state.json"
+    state = BotState(path=path, last_candle_ts=1)
+    state.save()
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".state-")]
+    assert leftovers == []
+    # The destination file must contain valid JSON.
+    json.loads(path.read_text())
+
+
+def test_reset_clears_open_trade_and_file(tmp_path):
+    path = tmp_path / "state.json"
+    state = BotState(path=path, open_trade=_open_trade(), last_candle_ts=42)
+    state.save()
+    assert path.exists()
+    state.reset()
+    assert not path.exists()
+    assert state.open_trade is None
+    assert state.last_candle_ts is None

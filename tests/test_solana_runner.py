@@ -199,6 +199,56 @@ def test_reconcile_skips_drift_check_for_paper_engine(tmp_path):
     assert state.open_trade is not None  # untouched
 
 
+def test_runner_persists_live_engine_order_ids_into_state(tmp_path, monkeypatch):
+    """When the engine surfaces last_order_ids (LiveEngine), they land in state.extras."""
+    from unittest.mock import MagicMock
+
+    from tradingagents.solana_bot import runner as runner_module
+    from tradingagents.solana_bot.trade import OpenTrade
+
+    df = _fixture_df()
+    cfg = BotConfig(rsi_long_min=0.0, rsi_long_max=100.0, home_dir=tmp_path)
+
+    # Replace PaperEngine with a stub that mimics LiveEngine's order-id surface.
+    fake_trade = OpenTrade.open_long(
+        entry=100.0, atr_value=2.0, size=0.1, atr_mult=1.5, tp1_r=1.0, tp2_r=2.0,
+        tp1_close_fraction=0.5, tp2_close_fraction=0.25, trail_atr_mult=1.5,
+    )
+
+    class _FakeEngine:
+        def __init__(self, *_, **__):
+            self.balance = 10_000.0
+            self.last_order_ids = {"entry": "sb-entry-deadbeef", "stop": "sb-stop-cafebabe"}
+
+        def open_long(self, **__):
+            return fake_trade
+
+        def manage(self, *_, **__):
+            from tradingagents.solana_bot.execution import PaperFillReport
+            return PaperFillReport()
+
+        def reconcile(self):
+            from tradingagents.solana_bot.execution import ReconcileReport
+            return ReconcileReport(quote_balance=10_000.0, base_balance=0.0, open_orders=[], is_live=False)
+
+    monkeypatch.setattr(runner_module, "PaperEngine", _FakeEngine)
+
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
+    )
+    assert state.has_open_trade()
+    assert state.extras.get("live_order_ids") == {
+        "entry": "sb-entry-deadbeef",
+        "stop": "sb-stop-cafebabe",
+    }
+
+
 def test_runner_writes_open_event_to_journal(tmp_path):
     """When a trade opens, a journal line with event=open is appended."""
     df = _fixture_df()

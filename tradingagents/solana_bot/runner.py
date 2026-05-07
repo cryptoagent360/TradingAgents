@@ -260,6 +260,13 @@ def _process_bar(
     trade_id = uuid.uuid4().hex
     state.extras["current_trade_id"] = trade_id
     state.extras["current_trade_pnl"] = 0.0
+    # LiveEngine surfaces .last_order_ids (entry / stop / etc. client_order_ids
+    # plus exchange IDs); persist them so a crash + restart can re-find the
+    # orders via fetch_order(). PaperEngine has no such attr — getattr returns
+    # None and the key is omitted from extras.
+    live_order_ids = getattr(engine, "last_order_ids", None)
+    if live_order_ids:
+        state.extras["live_order_ids"] = dict(live_order_ids)
     journal.record_open(
         trade_id=trade_id,
         symbol=config.symbol,

@@ -57,7 +57,10 @@ def ai_trade_filter(market_data: dict) -> str:
     global _last_ai_call
 
     with _last_call_lock:
-        if time.time() - _last_ai_call < AI_COOLDOWN_SECONDS:
+        # Monotonic, not wall-clock: NTP step adjustments would otherwise make
+        # the cooldown misfire (either gating us forever or letting a flood of
+        # signals through if the clock jumps backwards).
+        if time.monotonic() - _last_ai_call < AI_COOLDOWN_SECONDS:
             logger.info("AI filter REJECT (cooldown active)")
             return "REJECT"
 
@@ -80,7 +83,7 @@ def ai_trade_filter(market_data: dict) -> str:
             messages=[{"role": "user", "content": user_message}],
         )
         with _last_call_lock:
-            _last_ai_call = time.time()
+            _last_ai_call = time.monotonic()
         decision = next(
             block.text for block in response.content if block.type == "text"
         ).strip().upper()

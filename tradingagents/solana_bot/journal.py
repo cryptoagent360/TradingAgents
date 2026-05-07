@@ -23,7 +23,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from tradingagents.solana_bot.trade import FillEvent, OpenTrade
 
@@ -37,8 +37,9 @@ def _utcnow_iso() -> str:
 class TradeJournal:
     """Append-only JSONL ledger of trade-lifecycle events."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, clock: Callable[[], str] = _utcnow_iso):
         self.path = path
+        self._clock = clock
 
     def _append(self, payload: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,10 +54,10 @@ class TradeJournal:
         trade_id: str,
         symbol: str,
         trade: OpenTrade,
-        ts: Optional[str] = None,
+        ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
-            "ts": ts or _utcnow_iso(),
+            "ts": ts or self._clock(),
             "event": "open",
             "trade_id": trade_id,
             "symbol": symbol,
@@ -75,10 +76,10 @@ class TradeJournal:
         symbol: str,
         fill: FillEvent,
         realised_pnl: float,
-        ts: Optional[str] = None,
+        ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
-            "ts": ts or _utcnow_iso(),
+            "ts": ts or self._clock(),
             "event": "fill",
             "trade_id": trade_id,
             "symbol": symbol,
@@ -95,10 +96,10 @@ class TradeJournal:
         symbol: str,
         total_pnl: float,
         r_multiple: Optional[float] = None,
-        ts: Optional[str] = None,
+        ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
-            "ts": ts or _utcnow_iso(),
+            "ts": ts or self._clock(),
             "event": "close",
             "trade_id": trade_id,
             "symbol": symbol,

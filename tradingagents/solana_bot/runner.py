@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Literal, Optional
 
 from sol_bot import ai_filter as ai_filter_module
 from tradingagents.solana_bot.config import BotConfig
@@ -30,15 +30,21 @@ from tradingagents.solana_bot.trade import OpenTrade
 logger = logging.getLogger(__name__)
 
 
+CycleAction = Literal[
+    "opened", "managed", "no_setup", "ai_rejected", "execute_disabled",
+    "kill_switch", "stale",
+]
+
+
 @dataclass
 class CycleResult:
     """What happened during a single runner iteration. Useful for tests."""
 
-    # "opened" | "managed" | "no_setup" | "ai_rejected" | "execute_disabled"
-    # | "kill_switch" | "stale"
-    action: str
+    action: CycleAction
     detail: str = ""
-    fills: list = None
+    # Default factory, not a literal None — `for fill in result.fills:` must be
+    # safe on every CycleResult, not only the ones with actual fills.
+    fills: List = field(default_factory=list)
     pnl: float = 0.0
 
 

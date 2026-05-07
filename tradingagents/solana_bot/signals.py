@@ -32,7 +32,8 @@ class Signal:
         return self.direction == "LONG"
 
 
-NO_TRADE = lambda reason: Signal("NO_TRADE", reason)  # noqa: E731
+def NO_TRADE(reason: str) -> "Signal":
+    return Signal("NO_TRADE", reason)
 
 
 def check_long_setup(df: pd.DataFrame, config: BotConfig) -> Signal:

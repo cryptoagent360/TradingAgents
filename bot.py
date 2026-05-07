@@ -45,7 +45,10 @@ def main() -> int:
         timeframe=os.getenv("BOT_TIMEFRAME", "1h"),
     )
     starting_balance = float(os.getenv("BOT_STARTING_BALANCE", "10000"))
-    burn_in_hours = float(os.environ["BOT_BURN_IN_HOURS"]) if "BOT_BURN_IN_HOURS" in os.environ else None
+    # Use .get() so an empty BOT_BURN_IN_HOURS= line in .env (vs an unset key)
+    # is treated as "no budget" rather than blowing up on float("").
+    raw_burn_in = os.environ.get("BOT_BURN_IN_HOURS") or None
+    burn_in_hours = float(raw_burn_in) if raw_burn_in else None
     max_runtime_s = burn_in_hours * 3600 if burn_in_hours is not None else None
 
     log.info(

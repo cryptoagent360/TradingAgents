@@ -107,6 +107,21 @@ def test_missing_api_key_returns_reject(monkeypatch):
     assert ai_filter.ai_trade_filter(SAMPLE) == "REJECT"
 
 
+def test_no_text_block_in_response_returns_reject(monkeypatch):
+    """A response with only thinking-summary or tool_use blocks must REJECT, not StopIteration."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    fake_client = MagicMock()
+    response = MagicMock()
+    # Block exists but it's not a text block — the old next() generator raised
+    # StopIteration which got swallowed by the bare except. Now we detect it.
+    non_text_block = MagicMock()
+    non_text_block.type = "thinking"
+    response.content = [non_text_block]
+    fake_client.messages.create.return_value = response
+    monkeypatch.setattr(ai_filter, "_client", fake_client)
+    assert ai_filter.ai_trade_filter(SAMPLE) == "REJECT"
+
+
 def test_unexpected_exception_returns_reject(monkeypatch):
     """Belt-and-suspenders: any uncategorised error still fails closed."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")

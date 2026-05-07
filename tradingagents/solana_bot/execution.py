@@ -144,7 +144,8 @@ class LiveEngine:
     ):
         self.config = config
         self._client = client if client is not None else self._build_client(api_key, api_secret, testnet)
-        self._check_withdraw_permission()
+        self._market_cache: Optional[dict] = None  # populated on first _market() call
+        self._check_permissions()
         self._check_balance_ceiling()
         logger.info(
             "LiveEngine ready: testnet=%s symbol=%s max_live_balance=%.2f",
@@ -164,17 +165,33 @@ class LiveEngine:
             client.set_sandbox_mode(True)
         return client
 
-    def _check_withdraw_permission(self) -> None:
-        """Refuse to operate if the API key can withdraw funds."""
-        perms = self._client.fetch_account_permissions()
-        # Binance returns a dict like {"withdraw": False, "trade": True, ...}.
-        # Other exchanges may return different shapes; defensive lookup.
-        withdraw_enabled = perms.get("withdraw", perms.get("enableWithdrawals", False))
+    def _check_permissions(self) -> None:
+        """Refuse to operate if the API key can move funds anywhere.
+
+        Two flags matter: ``withdraw`` (off-platform) and ``transfer`` /
+        ``enableInternalTransfer`` (between Binance accounts — drains funds
+        just as effectively as a withdraw). DEFAULT to True (assume the worst)
+        if a flag is missing from the response — safer than the previous
+        default-False which silently passed empty/unexpected responses.
+        """
+        perms = self._client.fetch_account_permissions() or {}
+        withdraw_enabled = perms.get("withdraw", perms.get("enableWithdrawals", True))
+        transfer_enabled = perms.get(
+            "transfer", perms.get("enableInternalTransfer", False)
+        )
         if withdraw_enabled:
             raise WithdrawPermissionEnabled(
-                "the configured API key has withdraw permission — refusing to "
-                "operate. Generate a trade-only key (no withdraw, no transfer) "
-                "and restart."
+                "the configured API key has (or may have) withdraw permission — "
+                "refusing to operate. Generate a trade-only key (no withdraw, no "
+                "internal transfer) and restart. If the exchange does not expose "
+                "fetch_account_permissions and you have manually verified the key "
+                "is trade-only, set perms.withdraw=False explicitly in the response."
+            )
+        if transfer_enabled:
+            raise WithdrawPermissionEnabled(
+                "the configured API key has internal-transfer permission — refusing "
+                "to operate. Internal transfer can move funds to another Binance "
+                "account just as effectively as a withdraw. Disable it and restart."
             )
 
     def _check_balance_ceiling(self) -> None:
@@ -202,10 +219,18 @@ class LiveEngine:
         )
 
     def _market(self) -> dict:
-        """ccxt market metadata for the configured symbol — cached after first load."""
+        """ccxt market metadata for the configured symbol — cached after first load.
+
+        load_markets() can be a real network call on some ccxt builds; the
+        helper methods (_round_amount, _round_price, _check_min_notional) are
+        called multiple times per open_long, so we cache the dict per-engine.
+        """
+        if self._market_cache is not None:
+            return self._market_cache
         markets = self._client.load_markets()
         try:
-            return markets[self.config.symbol]
+            self._market_cache = markets[self.config.symbol]
+            return self._market_cache
         except KeyError as exc:
             raise ValueError(f"unknown symbol on exchange: {self.config.symbol}") from exc
 
@@ -248,6 +273,12 @@ class LiveEngine:
         reconcile() and handles the partial-exit + trailing logic against
         the exchange directly.
         """
+        # Re-check the balance ceiling on every open — the constructor check
+        # is a one-shot, but the operator may have deposited mid-run or PnL
+        # may have accumulated. The "tiny live capital only" invariant is
+        # only meaningful if it's enforced per trade.
+        self._check_balance_ceiling()
+
         size = self._round_amount(size)
         if size <= 0:
             raise BelowMinNotional("rounded size collapsed to 0 — increase risk_pct or balance")
@@ -267,6 +298,16 @@ class LiveEngine:
             params={"newClientOrderId": entry_coid},
         )
 
+        # Use the actual fill price ccxt reports, not the planned entry_price.
+        # On a fast move or a thin book the market order fills with slippage;
+        # if we use rounded_entry as the OpenTrade entry, R is mis-sized and
+        # all downstream stop/TP math is wrong. Fall back to rounded_entry
+        # when the exchange's response shape doesn't include average/price
+        # (e.g. partial info on testnet).
+        actual_entry = float(
+            entry_order.get("average") or entry_order.get("price") or rounded_entry
+        )
+
         # Place a protective stop-loss covering the full filled size. We use
         # STOP_LOSS_LIMIT (Binance spot) so we control the worst-case fill.
         stop_coid = self._client_order_id("stop")
@@ -284,7 +325,7 @@ class LiveEngine:
         )
 
         trade = OpenTrade.open_long(
-            entry=rounded_entry,
+            entry=actual_entry,
             atr_value=atr_value,
             size=size,
             atr_mult=self.config.atr_mult,
@@ -305,8 +346,10 @@ class LiveEngine:
             "stop_exchange_id": stop_order.get("id"),
         }
         logger.info(
-            "LIVE LONG opened: size=%.6f entry=%.4f stop=%.4f entry_coid=%s stop_coid=%s",
-            size, rounded_entry, stop_price, entry_coid, stop_coid,
+            "LIVE LONG opened: size=%.6f entry=%.4f stop=%.4f entry_coid=%s stop_coid=%s "
+            "(planned_entry=%.4f, slippage=%.4f)",
+            size, actual_entry, stop_price, entry_coid, stop_coid,
+            rounded_entry, actual_entry - rounded_entry,
         )
         return trade
 

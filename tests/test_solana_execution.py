@@ -51,10 +51,17 @@ def test_paper_engine_reconcile_returns_local_state():
     assert report.open_orders == []
 
 
-def _safe_client(quote_balance: float = 50.0, withdraw: bool = False) -> MagicMock:
+def _safe_client(
+    quote_balance: float = 50.0,
+    *,
+    withdraw: bool = False,
+    transfer: bool = False,
+) -> MagicMock:
     """Build a fake ccxt client with a known-safe account."""
     client = MagicMock()
-    client.fetch_account_permissions.return_value = {"withdraw": withdraw, "trade": True}
+    client.fetch_account_permissions.return_value = {
+        "withdraw": withdraw, "transfer": transfer, "trade": True,
+    }
     client.fetch_balance.return_value = {
         "USDT": {"free": quote_balance, "used": 0.0, "total": quote_balance},
         "SOL": {"free": 0.0, "used": 0.0, "total": 0.0},
@@ -93,6 +100,22 @@ def test_live_engine_refuses_withdraw_permission():
         LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=_safe_client(withdraw=True))
 
 
+def test_live_engine_refuses_internal_transfer_permission():
+    """Internal-transfer can move funds to another Binance account — also refuse."""
+    cfg = BotConfig(max_live_balance=100.0)
+    with pytest.raises(WithdrawPermissionEnabled):
+        LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=_safe_client(transfer=True))
+
+
+def test_live_engine_refuses_when_permissions_response_is_empty():
+    """Empty/unexpected permission shape used to default-allow; now defaults to refuse."""
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    client.fetch_account_permissions.return_value = {}  # exchange returned nothing useful
+    with pytest.raises(WithdrawPermissionEnabled):
+        LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+
 def test_live_engine_refuses_balance_above_ceiling():
     cfg = BotConfig(max_live_balance=100.0)
     with pytest.raises(LiveBalanceTooLarge):
@@ -110,6 +133,12 @@ def test_floor_to_step_rounds_down_never_up():
 def test_live_engine_open_long_places_market_entry_and_stop_loss():
     cfg = BotConfig(max_live_balance=100.0, atr_mult=1.5)
     client = _safe_client(50.0)
+    # Make the entry order report a fill price to exercise the actual_entry path.
+    client.create_order.side_effect = lambda **kwargs: {
+        "id": f"exch-{kwargs.get('params', {}).get('newClientOrderId', 'unk')}",
+        "average": 100.0,
+        "info": kwargs,
+    }
     engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
 
     trade = engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
@@ -184,6 +213,47 @@ def test_live_engine_manage_still_raises_until_orders_land():
     trade = engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
     with pytest.raises(NotImplementedError):
         engine.manage(trade, high=105.0, low=99.0, close=104.0)
+
+
+def test_live_engine_open_long_uses_actual_fill_price_not_planned():
+    """Slippage matters — OpenTrade.entry must be the real fill, not the planned one."""
+    cfg = BotConfig(max_live_balance=100.0, atr_mult=1.5)
+    client = _safe_client(50.0)
+    # Market filled $0.50 above the planned price (slippage on a fast move).
+    client.create_order.side_effect = lambda **kwargs: {
+        "id": "exch-x",
+        "average": 100.5 if kwargs["type"] == "market" else None,
+        "info": kwargs,
+    }
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+    trade = engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+    assert trade.entry == 100.5  # actual fill, not planned 100.0
+
+
+def test_live_engine_rechecks_balance_on_every_open():
+    """A mid-run deposit that bursts the ceiling must be caught at the next trade."""
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+    # Construction passed; now simulate a deposit before the first trade.
+    client.fetch_balance.return_value = {
+        "USDT": {"free": 5_000.0, "used": 0.0, "total": 5_000.0},
+        "SOL": {"free": 0.0, "used": 0.0, "total": 0.0},
+    }
+    with pytest.raises(LiveBalanceTooLarge):
+        engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+
+
+def test_live_engine_caches_market_metadata():
+    """load_markets() must be called at most once per engine instance."""
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+    engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+    # _round_amount + _round_price (twice: entry + stop) + _check_min_notional
+    # would have called load_markets() 4 times if not cached.
+    assert client.load_markets.call_count == 1
 
 
 def test_live_engine_reconcile_returns_balances_and_open_orders():

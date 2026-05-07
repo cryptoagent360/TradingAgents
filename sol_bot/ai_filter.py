@@ -84,9 +84,15 @@ def ai_trade_filter(market_data: dict) -> str:
         )
         with _last_call_lock:
             _last_ai_call = time.monotonic()
-        decision = next(
-            block.text for block in response.content if block.type == "text"
-        ).strip().upper()
+        # Defensive: a response with no text block (e.g. only thinking-summary
+        # or tool_use) would StopIteration here, which would surface as a
+        # confusing error inside the bare `except Exception` below. Treat
+        # missing text as REJECT directly with a clearer log.
+        text_blocks = [b for b in response.content if b.type == "text"]
+        if not text_blocks:
+            logger.warning("AI filter REJECT (no text block in response)")
+            return "REJECT"
+        decision = text_blocks[0].text.strip().upper()
         latency = time.time() - start
         logger.info("AI filter %s (latency=%.2fs)", decision, latency)
         return "APPROVE" if decision == "APPROVE" else "REJECT"

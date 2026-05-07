@@ -109,3 +109,23 @@ def test_save_creates_lock_file_alongside_state(tmp_path):
     BotState(path=path, last_candle_ts=1).save()
     lock_path = path.with_suffix(".lock")
     assert lock_path.exists(), "expected sibling .lock file"
+
+
+def test_load_quarantines_corrupt_file_and_returns_empty(tmp_path):
+    """A truncated or otherwise unparseable state file must not crash the bot."""
+    path = tmp_path / "state.json"
+    # Write a malformed JSON payload — e.g. the runner crashed mid-write before
+    # the atomic rename, or a disk error left a half-flushed file.
+    path.write_text('{"open_trade": null, "last_canDLE_ts')
+
+    loaded = BotState.load(path)
+    # Fresh empty state — bot can keep running.
+    assert loaded.path == path
+    assert loaded.open_trade is None
+    assert loaded.last_candle_ts is None
+
+    # Original path is gone (renamed away); a quarantine sibling exists for forensics.
+    assert not path.exists()
+    quarantined = list(tmp_path.glob("state.corrupt-*"))
+    assert len(quarantined) == 1, f"expected 1 quarantine file, got {quarantined}"
+    assert "last_canDLE_ts" in quarantined[0].read_text()

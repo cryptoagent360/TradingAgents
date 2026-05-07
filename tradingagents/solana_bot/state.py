@@ -29,6 +29,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -112,7 +113,26 @@ class BotState:
         if not path.exists():
             return cls(path=path)
         with path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
+            try:
+                data = json.load(fh)
+            except json.JSONDecodeError as exc:
+                # Disk corruption, partial write left behind by an unclean shutdown,
+                # or operator hand-edit gone wrong. Preserve the bad file for
+                # forensics, log loudly, and start from a clean empty state so the
+                # bot can keep running. Losing a tracked open trade is worse than
+                # crashing only if an open trade exists; reconcile (Phase 4 work)
+                # is what catches an exchange-side position with no local record.
+                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                quarantine = path.with_suffix(f".corrupt-{ts}")
+                try:
+                    path.rename(quarantine)
+                except OSError:
+                    quarantine = path  # rename failed; leave path as-is for the operator
+                logger.error(
+                    "state file at %s is corrupt (%s); quarantined to %s and starting fresh",
+                    path, exc, quarantine,
+                )
+                return cls(path=path)
         # The version field was renamed schema_version → state_version mid-flight.
         # Accept either key on load (state_version wins if both present); missing
         # both keys is treated as the current version, for backward compat with

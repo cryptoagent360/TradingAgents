@@ -1,6 +1,7 @@
 """Atomic JSON persistence for the bot state."""
 
 import json
+from contextlib import ExitStack
 
 import pytest
 
@@ -9,6 +10,7 @@ from tradingagents.solana_bot.state import (
     STATE_BACKUP_COUNT,
     STATE_VERSION,
     BotState,
+    RunnerAlreadyActive,
     StateVersionMismatch,
 )
 from tradingagents.solana_bot.trade import OpenTrade
@@ -145,6 +147,26 @@ def test_save_trims_old_backup_snapshots_to_retention_limit(tmp_path):
     # contains the latest last_candle_ts value.
     newest = json.loads(backups[-1].read_text())
     assert newest["last_candle_ts"] == STATE_BACKUP_COUNT + 4
+
+
+def test_runner_lock_can_be_acquired_and_released(tmp_path):
+    state = BotState(path=tmp_path / "state.json")
+    with state.acquire_runner_lock():
+        pass
+    # Re-acquire after release must succeed.
+    with state.acquire_runner_lock():
+        pass
+
+
+def test_runner_lock_blocks_a_second_acquisition(tmp_path):
+    """A second bot instance pointed at the same state path must refuse to start."""
+    path = tmp_path / "state.json"
+    state1 = BotState(path=path)
+    state2 = BotState(path=path)
+    with ExitStack() as stack:
+        stack.enter_context(state1.acquire_runner_lock())
+        with pytest.raises(RunnerAlreadyActive):
+            stack.enter_context(state2.acquire_runner_lock())
 
 
 def test_load_quarantines_corrupt_file_and_returns_empty(tmp_path):

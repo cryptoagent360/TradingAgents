@@ -54,6 +54,10 @@ class StateVersionMismatch(Exception):
     """Raised when a state file's state_version does not match the runtime."""
 
 
+class RunnerAlreadyActive(Exception):
+    """Raised at startup if another bot instance holds the runner lock."""
+
+
 @contextmanager
 def _file_lock(lock_path: Path) -> Iterator[None]:
     """Acquire an exclusive advisory lock on ``lock_path``. No-op on Windows."""
@@ -179,6 +183,56 @@ class BotState:
             tracker=tracker,
             extras=data.get("extras", {}),
         )
+
+    @contextmanager
+    def acquire_runner_lock(self) -> Iterator[None]:
+        """Hold an exclusive lock for the lifetime of the runner.
+
+        Prevents a second ``python bot.py`` against the same state path
+        from starting. The lock is bound to the process — if the holder
+        dies (kill -9, OOM, panic), the OS releases it automatically and
+        the next start succeeds. No stale-lock cleanup needed.
+
+        Raises ``RunnerAlreadyActive`` if another instance already holds
+        the lock. On Windows where fcntl is unavailable this is a no-op
+        with a warning.
+        """
+        if not _HAS_FCNTL:
+            logger.warning(
+                "fcntl unavailable; runner lock is a no-op. "
+                "Do not start multiple bot instances against this state path."
+            )
+            yield
+            return
+        lock_path = self.path.parent / f"{self.path.stem}.runner-lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(lock_path, "w")
+        # Acquire BEFORE entering the cleanup-guaranteed block, so that a
+        # failed acquisition doesn't trigger flock-on-closed-fd in finally.
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fd.close()
+            raise RunnerAlreadyActive(
+                f"another bot instance already holds the runner lock at "
+                f"{lock_path}. Refusing to start a second instance against "
+                f"the same state path."
+            )
+        try:
+            # Stamp our PID so an operator inspecting the lock file knows who
+            # owns it. Best-effort — failure to write is non-fatal.
+            try:
+                fd.write(str(os.getpid()))
+                fd.flush()
+            except OSError:
+                pass
+            yield
+        finally:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            fd.close()
 
     def reset(self) -> None:
         self.open_trade = None

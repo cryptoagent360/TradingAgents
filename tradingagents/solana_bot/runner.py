@@ -11,6 +11,7 @@ operator must restart the process to clear it (intentional friction).
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -19,6 +20,7 @@ from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.data import fetch_latest_closed_bars, sleep_until_next_candle
 from tradingagents.solana_bot.execution import PaperEngine
 from tradingagents.solana_bot.indicators import attach_indicators
+from tradingagents.solana_bot.journal import TradeJournal
 from tradingagents.solana_bot.risk import DailyLossTracker, position_size
 from tradingagents.solana_bot.signals import check_long_setup
 from tradingagents.solana_bot.state import BotState
@@ -60,6 +62,7 @@ def run_paper(
     fetcher: Optional[Callable] = None,
     ai_filter: Optional[Callable[[dict], str]] = None,
     execute_trades: Optional[bool] = None,
+    journal: Optional[TradeJournal] = None,
 ) -> BotState:
     """Run the paper-trade loop.
 
@@ -67,7 +70,8 @@ def run_paper(
     ``sleeper`` and ``fetcher`` are injectable so tests can drive the
     loop deterministically without sleeping or hitting the network.
     ``ai_filter`` and ``execute_trades`` are also injectable so tests
-    can pin both gates without hitting Claude or the env.
+    can pin both gates without hitting Claude or the env. ``journal``
+    is injectable so tests can point the trade ledger at tmp_path.
     """
     state = BotState.load(config.state_path)
     if state.tracker is None:
@@ -76,7 +80,13 @@ def run_paper(
     fetch = fetcher if fetcher is not None else (lambda cfg, n: fetch_latest_closed_bars(cfg, n))
     ai = ai_filter if ai_filter is not None else ai_filter_module.ai_trade_filter
     execute = execute_trades if execute_trades is not None else ai_filter_module.EXECUTE_TRADES
+    log = journal if journal is not None else TradeJournal(config.journal_path)
 
+    with state.acquire_runner_lock():
+        return _run_loop(state, engine, config, fetch, ai, execute, log, sleeper, max_cycles)
+
+
+def _run_loop(state, engine, config, fetch, ai, execute, log, sleeper, max_cycles):
     cycle = 0
     while True:
         if max_cycles is not None and cycle >= max_cycles:

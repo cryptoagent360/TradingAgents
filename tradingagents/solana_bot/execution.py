@@ -53,6 +53,11 @@ class ReconcileReport:
     quote_balance: float
     base_balance: float
     open_orders: List[dict] = field(default_factory=list)
+    is_live: bool = False  # PaperEngine returns False; LiveEngine returns True
+
+
+class ReconcileMismatch(Exception):
+    """Raised at runner startup if local state and exchange state disagree."""
 
 
 class WithdrawPermissionEnabled(Exception):
@@ -107,6 +112,7 @@ class PaperEngine:
             quote_balance=self.balance,
             base_balance=0.0,
             open_orders=[],
+            is_live=False,
         )
 
 
@@ -192,6 +198,7 @@ class LiveEngine:
             quote_balance=quote_balance,
             base_balance=base_balance,
             open_orders=open_orders,
+            is_live=True,
         )
 
     def _market(self) -> dict:

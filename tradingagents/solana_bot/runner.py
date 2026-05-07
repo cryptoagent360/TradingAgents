@@ -19,7 +19,7 @@ from typing import Callable, Optional
 from sol_bot import ai_filter as ai_filter_module
 from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.data import fetch_latest_closed_bars, sleep_until_next_candle
-from tradingagents.solana_bot.execution import PaperEngine
+from tradingagents.solana_bot.execution import PaperEngine, ReconcileMismatch
 from tradingagents.solana_bot.indicators import attach_indicators
 from tradingagents.solana_bot.journal import TradeJournal
 from tradingagents.solana_bot.risk import DailyLossTracker, position_size
@@ -90,10 +90,48 @@ def run_paper(
     log = journal if journal is not None else TradeJournal(config.journal_path)
 
     with state.acquire_runner_lock():
+        _reconcile_or_die(state, engine)
         return _run_loop(
             state, engine, config, fetch, ai, execute, log, sleeper,
             max_cycles, max_runtime_s, monotonic,
         )
+
+
+def _reconcile_or_die(state: BotState, engine) -> None:
+    """Reconcile local state against the exchange before the loop starts.
+
+    Three drift cases against a live engine:
+      A. State has a trade and exchange has a position → matched, continue.
+      B. State has a trade but exchange has no position → trade closed
+         while we were down. Clear the local trade and continue.
+      C. State has no trade but exchange has a position → DRIFT. Refuse
+         to operate (ReconcileMismatch) — could be a position the
+         operator opened manually, or a bug. Fail closed.
+
+    PaperEngine reports is_live=False; drift detection is skipped.
+    """
+    report = engine.reconcile()
+    if not report.is_live:
+        return
+    state_has_trade = state.has_open_trade()
+    exchange_has_position = report.base_balance > 0 or len(report.open_orders) > 0
+    if state_has_trade and not exchange_has_position:
+        logger.warning(
+            "RECONCILE: state shows open trade but exchange has none — assuming "
+            "trade closed during downtime; clearing local trade"
+        )
+        state.open_trade = None
+        state.extras.pop("current_trade_id", None)
+        state.extras.pop("current_trade_pnl", None)
+        state.save()
+    elif not state_has_trade and exchange_has_position:
+        raise ReconcileMismatch(
+            f"exchange shows base balance {report.base_balance:.6f} or "
+            f"{len(report.open_orders)} open orders, but local state has no "
+            f"open trade. Refusing to start; investigate manually before clearing."
+        )
+    else:
+        logger.info("reconcile OK: state and exchange agree")
 
 
 def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles, max_runtime_s, monotonic):

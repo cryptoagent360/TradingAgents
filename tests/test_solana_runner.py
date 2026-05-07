@@ -129,6 +129,76 @@ def test_runner_exits_when_burn_in_budget_elapsed(tmp_path):
     assert not state.tracker.kill_switch_triggered
 
 
+def test_reconcile_clears_local_trade_when_exchange_has_no_position(tmp_path, monkeypatch):
+    """Drift case B: state has open trade, exchange has none → trade closed during downtime."""
+    from unittest.mock import MagicMock
+
+    from tradingagents.solana_bot.execution import ReconcileReport
+    from tradingagents.solana_bot.runner import _reconcile_or_die
+    from tradingagents.solana_bot.state import BotState
+    from tradingagents.solana_bot.trade import OpenTrade
+
+    state = BotState(path=tmp_path / "state.json")
+    state.open_trade = OpenTrade.open_long(
+        entry=100.0, atr_value=2.0, size=10.0, atr_mult=1.5, tp1_r=1.0, tp2_r=2.0,
+        tp1_close_fraction=0.5, tp2_close_fraction=0.25, trail_atr_mult=1.5,
+    )
+    state.extras["current_trade_id"] = "abc"
+
+    fake_engine = MagicMock()
+    fake_engine.reconcile.return_value = ReconcileReport(
+        quote_balance=100.0, base_balance=0.0, open_orders=[], is_live=True,
+    )
+
+    _reconcile_or_die(state, fake_engine)
+
+    assert state.open_trade is None
+    assert "current_trade_id" not in state.extras
+
+
+def test_reconcile_refuses_to_start_when_exchange_has_unexpected_position(tmp_path):
+    """Drift case C: state empty, exchange has position → fail closed."""
+    from unittest.mock import MagicMock
+
+    from tradingagents.solana_bot.execution import ReconcileMismatch, ReconcileReport
+    from tradingagents.solana_bot.runner import _reconcile_or_die
+    from tradingagents.solana_bot.state import BotState
+
+    state = BotState(path=tmp_path / "state.json")  # no open trade
+    fake_engine = MagicMock()
+    fake_engine.reconcile.return_value = ReconcileReport(
+        quote_balance=100.0, base_balance=2.5, open_orders=[], is_live=True,
+    )
+
+    with pytest.raises(ReconcileMismatch):
+        _reconcile_or_die(state, fake_engine)
+
+
+def test_reconcile_skips_drift_check_for_paper_engine(tmp_path):
+    """PaperEngine reports is_live=False; the drift check is a no-op."""
+    from unittest.mock import MagicMock
+
+    from tradingagents.solana_bot.execution import ReconcileReport
+    from tradingagents.solana_bot.runner import _reconcile_or_die
+    from tradingagents.solana_bot.state import BotState
+    from tradingagents.solana_bot.trade import OpenTrade
+
+    state = BotState(path=tmp_path / "state.json")
+    state.open_trade = OpenTrade.open_long(
+        entry=100.0, atr_value=2.0, size=10.0, atr_mult=1.5, tp1_r=1.0, tp2_r=2.0,
+        tp1_close_fraction=0.5, tp2_close_fraction=0.25, trail_atr_mult=1.5,
+    )
+
+    paper_engine = MagicMock()
+    paper_engine.reconcile.return_value = ReconcileReport(
+        quote_balance=10000.0, base_balance=0.0, open_orders=[], is_live=False,
+    )
+
+    # Even though state has trade and "exchange" has none, paper mode is exempt.
+    _reconcile_or_die(state, paper_engine)
+    assert state.open_trade is not None  # untouched
+
+
 def test_runner_writes_open_event_to_journal(tmp_path):
     """When a trade opens, a journal line with event=open is appended."""
     df = _fixture_df()

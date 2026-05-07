@@ -5,13 +5,11 @@ Runs **after** a valid strategy signal — never on its own. Returns
 timeout, API error, missing API key, malformed response) yields
 "REJECT" — the filter fails closed, never opens a trade by accident.
 
-EXECUTE_TRADES is the operator opt-in for real-money execution. It is
-read once from the environment at module import:
-
-    EXECUTE_TRADES=1 tradingagents solana paper ...
-
-Default is False. The runner consults this constant before placing any
-order; this is the *only* execution-gate path.
+EXECUTE_TRADES is the operator opt-in for real-money live execution.
+It is a hardcoded source constant — flipping it to True requires an
+explicit code edit and a git commit, leaving a review trail. The
+runner consults this constant before placing live orders; paper mode
+overrides it at the CLI layer because paper fills are simulated.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-EXECUTE_TRADES: bool = os.getenv("EXECUTE_TRADES", "").lower() in ("1", "true", "yes")
+EXECUTE_TRADES = False
 
 AI_COOLDOWN_SECONDS = 60.0
 AI_TIMEOUT_SECONDS = 5.0

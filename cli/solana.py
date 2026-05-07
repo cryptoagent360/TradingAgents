@@ -79,7 +79,9 @@ def paper(
     config = _make_config(symbol=symbol, timeframe=timeframe, exchange=exchange)
     console.print(f"[cyan]Starting paper run for {symbol} {timeframe} (balance={balance}).[/cyan]")
     console.print(f"[dim]State file: {config.state_path}[/dim]\n")
-    state = run_paper(config, starting_balance=balance, max_cycles=cycles)
+    # Paper fills are simulated, so the live-execution kill switch does
+    # not apply here — flip it on at the runner level for paper mode.
+    state = run_paper(config, starting_balance=balance, max_cycles=cycles, execute_trades=True)
     if state.tracker is not None:
         console.print(
             f"\n[bold]Today PnL:[/bold] {state.tracker.today_pnl:.2f} "

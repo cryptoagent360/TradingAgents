@@ -56,6 +56,10 @@ class BotConfig:
         return self.home_dir / "backtests"
 
     @property
+    def journal_path(self) -> Path:
+        return self.home_dir / "journal.jsonl"
+
+    @property
     def min_bars(self) -> int:
         # Need enough history to compute EMA200 + a stable ATR/RSI window.
         return self.ema_slow + max(self.atr_period, self.rsi_period) + 5

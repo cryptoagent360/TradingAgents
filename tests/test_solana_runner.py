@@ -4,6 +4,8 @@ Drives ``run_paper`` with an injected fetcher and a no-op sleeper so the
 loop can be exercised without network or wall-clock waits.
 """
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -92,6 +94,28 @@ def test_runner_blocks_trade_when_execute_disabled(tmp_path):
         execute_trades=False,
     )
     assert not state.has_open_trade()
+
+
+def test_runner_writes_open_event_to_journal(tmp_path):
+    """When a trade opens, a journal line with event=open is appended."""
+    df = _fixture_df()
+    cfg = BotConfig(rsi_long_min=0.0, rsi_long_max=100.0, home_dir=tmp_path)
+
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
+    )
+    assert state.has_open_trade()
+    assert "current_trade_id" in state.extras
+    journal_path = cfg.journal_path
+    assert journal_path.exists()
+    lines = [json.loads(line) for line in journal_path.read_text().splitlines() if line.strip()]
+    assert any(e.get("event") == "open" for e in lines)
 
 
 def test_runner_calls_ai_only_after_signal_fires(tmp_path):

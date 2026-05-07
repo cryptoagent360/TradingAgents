@@ -86,7 +86,7 @@ def run_paper(
         return _run_loop(state, engine, config, fetch, ai, execute, log, sleeper, max_cycles)
 
 
-def _run_loop(state, engine, config, fetch, ai, execute, log, sleeper, max_cycles):
+def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles):
     cycle = 0
     while True:
         if max_cycles is not None and cycle >= max_cycles:
@@ -119,7 +119,7 @@ def _run_loop(state, engine, config, fetch, ai, execute, log, sleeper, max_cycle
         )
         bar = enriched.iloc[-1]
 
-        result = _process_bar(state, engine, enriched, bar, config, ai_filter=ai, execute_trades=execute)
+        result = _process_bar(state, engine, enriched, bar, config, ai_filter=ai, execute_trades=execute, journal=journal)
         state.save()
         logger.info("cycle %d: %s — %s", cycle, result.action, result.detail)
 
@@ -139,6 +139,7 @@ def _process_bar(
     *,
     ai_filter: Callable[[dict], str],
     execute_trades: bool,
+    journal: TradeJournal,
 ) -> CycleResult:
     if state.has_open_trade():
         report = engine.manage(
@@ -149,7 +150,32 @@ def _process_bar(
         )
         if report.fills:
             state.tracker.record_pnl(report.realised_pnl)  # type: ignore[union-attr]
+            trade_id = state.extras.get("current_trade_id", "")
+            for ev in report.fills:
+                journal.record_fill(
+                    trade_id=trade_id,
+                    symbol=config.symbol,
+                    fill=ev,
+                    realised_pnl=report.realised_pnl / max(len(report.fills), 1),
+                )
+            state.extras["current_trade_pnl"] = (
+                state.extras.get("current_trade_pnl", 0.0) + report.realised_pnl
+            )
             if state.open_trade.is_closed():  # type: ignore[union-attr]
+                # Close the trade lifecycle: write the close event then drop
+                # the trade-id keys from extras so the next open gets fresh ones.
+                total_pnl = state.extras.get("current_trade_pnl", report.realised_pnl)
+                trade = state.open_trade
+                r_per_unit = trade.entry - trade.initial_stop  # type: ignore[union-attr]
+                r_multiple = total_pnl / (r_per_unit * trade.size) if r_per_unit > 0 and trade.size > 0 else None  # type: ignore[union-attr]
+                journal.record_close(
+                    trade_id=trade_id,
+                    symbol=config.symbol,
+                    total_pnl=total_pnl,
+                    r_multiple=r_multiple,
+                )
+                state.extras.pop("current_trade_id", None)
+                state.extras.pop("current_trade_pnl", None)
                 state.open_trade = None
             return CycleResult("managed", detail=f"{len(report.fills)} fill(s)", fills=report.fills, pnl=report.realised_pnl)
         return CycleResult("managed", detail="no fills this bar")
@@ -177,4 +203,12 @@ def _process_bar(
     size = position_size(engine.balance, entry_price, stop, config.risk_pct)
     trade: OpenTrade = engine.open_long(entry_price=entry_price, size=size, atr_value=atr_value)
     state.open_trade = trade
+    trade_id = uuid.uuid4().hex
+    state.extras["current_trade_id"] = trade_id
+    state.extras["current_trade_pnl"] = 0.0
+    journal.record_open(
+        trade_id=trade_id,
+        symbol=config.symbol,
+        trade=trade,
+    )
     return CycleResult("opened", detail=f"size={size:.4f} entry={entry_price:.4f} stop={stop:.4f}")

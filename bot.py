@@ -15,6 +15,7 @@ defaults (no CLI flags, since this is meant to run unattended):
     BOT_STARTING_BALANCE  account size in quote currency (default 10000)
     BOT_SYMBOL            trading pair (default SOL/USDT)
     BOT_TIMEFRAME         candle timeframe (default 1h)
+    BOT_BURN_IN_HOURS     wall-clock budget; loop exits after N hours (default unlimited)
 """
 
 from __future__ import annotations
@@ -44,13 +45,16 @@ def main() -> int:
         timeframe=os.getenv("BOT_TIMEFRAME", "1h"),
     )
     starting_balance = float(os.getenv("BOT_STARTING_BALANCE", "10000"))
+    burn_in_hours = float(os.environ["BOT_BURN_IN_HOURS"]) if "BOT_BURN_IN_HOURS" in os.environ else None
+    max_runtime_s = burn_in_hours * 3600 if burn_in_hours is not None else None
 
     log.info(
-        "starting bot: symbol=%s timeframe=%s balance=%.2f execute_trades=%s",
+        "starting bot: symbol=%s timeframe=%s balance=%.2f execute_trades=%s burn_in_hours=%s",
         config.symbol,
         config.timeframe,
         starting_balance,
         EXECUTE_TRADES,
+        burn_in_hours,
     )
     if not EXECUTE_TRADES:
         log.warning(
@@ -62,6 +66,7 @@ def main() -> int:
         config,
         starting_balance=starting_balance,
         execute_trades=EXECUTE_TRADES,
+        max_runtime_s=max_runtime_s,
     )
     return 0
 

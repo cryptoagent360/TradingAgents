@@ -74,14 +74,25 @@ def paper(
     balance: float = typer.Option(10000.0, "--balance"),
     exchange: str = typer.Option("binance", "--exchange"),
     cycles: Optional[int] = typer.Option(None, "--cycles", help="Run only N cycles then exit (for smoke testing)"),
+    burn_in_hours: Optional[float] = typer.Option(
+        None, "--burn-in-hours", help="Run for at most N hours then exit cleanly (for pre-live burn-in)"
+    ),
 ) -> None:
     """Run the paper-trade loop against live OHLCV with simulated fills."""
     config = _make_config(symbol=symbol, timeframe=timeframe, exchange=exchange)
     console.print(f"[cyan]Starting paper run for {symbol} {timeframe} (balance={balance}).[/cyan]")
+    if burn_in_hours is not None:
+        console.print(f"[cyan]Burn-in budget: {burn_in_hours:.1f} hours.[/cyan]")
     console.print(f"[dim]State file: {config.state_path}[/dim]\n")
     # Paper fills are simulated, so the live-execution kill switch does
     # not apply here — flip it on at the runner level for paper mode.
-    state = run_paper(config, starting_balance=balance, max_cycles=cycles, execute_trades=True)
+    state = run_paper(
+        config,
+        starting_balance=balance,
+        max_cycles=cycles,
+        max_runtime_s=burn_in_hours * 3600 if burn_in_hours is not None else None,
+        execute_trades=True,
+    )
     if state.tracker is not None:
         console.print(
             f"\n[bold]Today PnL:[/bold] {state.tracker.today_pnl:.2f} "

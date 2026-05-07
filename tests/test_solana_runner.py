@@ -96,6 +96,39 @@ def test_runner_blocks_trade_when_execute_disabled(tmp_path):
     assert not state.has_open_trade()
 
 
+def test_runner_exits_when_burn_in_budget_elapsed(tmp_path):
+    """A 3h burn-in budget exits cleanly without a kill switch trip."""
+    flat = pd.DataFrame(
+        {
+            "timestamp": np.arange(260) * 3600 * 1000,
+            "open": [100.0] * 260,
+            "high": [101.0] * 260,
+            "low": [99.0] * 260,
+            "close": [100.0] * 260,
+            "volume": [1000.0] * 260,
+        }
+    )
+    cfg = BotConfig(home_dir=tmp_path)
+
+    # Mock monotonic clock that fast-forwards 90 minutes per call so the
+    # 3h budget trips after 2 cycle checks.
+    fake_clock = iter([0.0, 5400.0, 10800.0, 16200.0])
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_runtime_s=3 * 3600,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: flat,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
+        monotonic=lambda: next(fake_clock),
+    )
+    assert state.extras.get("last_cycle") == "burn_in_complete"
+    # No daily-loss kill switch should have tripped.
+    assert state.tracker is not None
+    assert not state.tracker.kill_switch_triggered
+
+
 def test_runner_writes_open_event_to_journal(tmp_path):
     """When a trade opens, a journal line with event=open is appended."""
     df = _fixture_df()

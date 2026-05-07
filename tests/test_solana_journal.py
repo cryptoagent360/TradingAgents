@@ -32,7 +32,10 @@ def _read_lines(path) -> list[dict]:
 
 def test_record_open_writes_a_well_formed_line(tmp_path):
     j = TradeJournal(tmp_path / "journal.jsonl")
-    j.record_open(trade_id="abc", symbol="SOL/USDT", trade=_open_trade())
+    j.record_open(
+        trade_id="abc", symbol="SOL/USDT", trade=_open_trade(),
+        cycle_number=42, bar_timestamp=1_700_000_000_000,
+    )
     [entry] = _read_lines(tmp_path / "journal.jsonl")
     assert entry["event"] == "open"
     assert entry["trade_id"] == "abc"
@@ -41,7 +44,17 @@ def test_record_open_writes_a_well_formed_line(tmp_path):
     assert entry["initial_stop"] == 97.0
     assert entry["tp1_price"] == 103.0
     assert entry["tp2_price"] == 106.0
+    assert entry["cycle_number"] == 42
+    assert entry["bar_timestamp"] == 1_700_000_000_000
     assert "ts" in entry
+
+
+def test_clock_is_injectable(tmp_path):
+    """Tests can pin the clock without monkeypatching the journal module."""
+    j = TradeJournal(tmp_path / "journal.jsonl", clock=lambda: "2026-05-07T12:00:00+00:00")
+    j.record_open(trade_id="abc", symbol="SOL/USDT", trade=_open_trade())
+    [entry] = _read_lines(tmp_path / "journal.jsonl")
+    assert entry["ts"] == "2026-05-07T12:00:00+00:00"
 
 
 def test_record_fill_writes_a_well_formed_line(tmp_path):

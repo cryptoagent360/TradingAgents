@@ -54,6 +54,8 @@ class TradeJournal:
         trade_id: str,
         symbol: str,
         trade: OpenTrade,
+        cycle_number: Optional[int] = None,
+        bar_timestamp: Optional[int] = None,
         ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
@@ -67,6 +69,8 @@ class TradeJournal:
             "tp2_price": trade.tp2_price,
             "size": trade.size,
             "atr_at_entry": trade.atr_at_entry,
+            "cycle_number": cycle_number,
+            "bar_timestamp": bar_timestamp,
         })
 
     def record_fill(
@@ -76,6 +80,8 @@ class TradeJournal:
         symbol: str,
         fill: FillEvent,
         realised_pnl: float,
+        cycle_number: Optional[int] = None,
+        bar_timestamp: Optional[int] = None,
         ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
@@ -87,6 +93,8 @@ class TradeJournal:
             "price": fill.price,
             "size": fill.size,
             "realised_pnl": realised_pnl,
+            "cycle_number": cycle_number,
+            "bar_timestamp": bar_timestamp,
         })
 
     def record_close(
@@ -96,6 +104,8 @@ class TradeJournal:
         symbol: str,
         total_pnl: float,
         r_multiple: Optional[float] = None,
+        cycle_number: Optional[int] = None,
+        bar_timestamp: Optional[int] = None,
         ts: Optional[str] = None,  # caller may override; otherwise uses self._clock
     ) -> None:
         self._append({
@@ -105,4 +115,6 @@ class TradeJournal:
             "symbol": symbol,
             "total_pnl": total_pnl,
             "r_multiple": r_multiple,
+            "cycle_number": cycle_number,
+            "bar_timestamp": bar_timestamp,
         })

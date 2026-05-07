@@ -179,7 +179,11 @@ def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_c
         )
         bar = enriched.iloc[-1]
 
-        result = _process_bar(state, engine, enriched, bar, config, ai_filter=ai, execute_trades=execute, journal=journal)
+        result = _process_bar(
+            state, engine, enriched, bar, config,
+            ai_filter=ai, execute_trades=execute, journal=journal,
+            cycle_number=cycle,
+        )
         state.save()
         logger.info("cycle %d: %s — %s", cycle, result.action, result.detail)
 
@@ -200,7 +204,9 @@ def _process_bar(
     ai_filter: Callable[[dict], str],
     execute_trades: bool,
     journal: TradeJournal,
+    cycle_number: Optional[int] = None,
 ) -> CycleResult:
+    bar_ts = int(bar["timestamp"]) if "timestamp" in bar else None
     # run_paper guarantees these are non-None by the time _process_bar is
     # called: the loop primes state.tracker before the first cycle, and
     # state.open_trade is whatever the prior cycle persisted (may be None,
@@ -228,6 +234,8 @@ def _process_bar(
                     symbol=config.symbol,
                     fill=ev,
                     realised_pnl=report.realised_pnl / max(len(report.fills), 1),
+                    cycle_number=cycle_number,
+                    bar_timestamp=bar_ts,
                 )
             state.extras["current_trade_pnl"] = (
                 state.extras.get("current_trade_pnl", 0.0) + report.realised_pnl
@@ -243,6 +251,8 @@ def _process_bar(
                     symbol=config.symbol,
                     total_pnl=total_pnl,
                     r_multiple=r_multiple,
+                    cycle_number=cycle_number,
+                    bar_timestamp=bar_ts,
                 )
                 state.extras.pop("current_trade_id", None)
                 state.extras.pop("current_trade_pnl", None)
@@ -287,5 +297,7 @@ def _process_bar(
         trade_id=trade_id,
         symbol=config.symbol,
         trade=trade,
+        cycle_number=cycle_number,
+        bar_timestamp=bar_ts,
     )
     return CycleResult("opened", detail=f"size={size:.4f} entry={entry_price:.4f} stop={stop:.4f}")

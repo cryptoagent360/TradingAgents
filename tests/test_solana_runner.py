@@ -268,7 +268,11 @@ def test_runner_writes_open_event_to_journal(tmp_path):
     journal_path = cfg.journal_path
     assert journal_path.exists()
     lines = [json.loads(line) for line in journal_path.read_text().splitlines() if line.strip()]
-    assert any(e.get("event") == "open" for e in lines)
+    open_events = [e for e in lines if e.get("event") == "open"]
+    assert open_events, "expected at least one open event"
+    # cycle_number + bar_timestamp must be populated, not just present-as-None.
+    assert open_events[0]["cycle_number"] == 1
+    assert isinstance(open_events[0]["bar_timestamp"], int)
 
 
 def test_runner_calls_ai_only_after_signal_fires(tmp_path):

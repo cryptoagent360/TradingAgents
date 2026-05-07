@@ -61,7 +61,15 @@ def ai_trade_filter(market_data):
         return "REJECT"
 
 
-def should_execute_trade(market_data):
-    if not EXECUTE_TRADES:
-        return False
-    return ai_trade_filter(market_data) == "APPROVE"
+def execute_trade():
+    raise NotImplementedError(
+        "Live execution stub — wire ccxt order placement here before flipping "
+        "EXECUTE_TRADES = True."
+    )
+
+
+def dispatch_trade():
+    if EXECUTE_TRADES:
+        execute_trade()
+    else:
+        print("SIMULATION: Trade would execute")

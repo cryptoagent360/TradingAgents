@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tradingagents.solana_bot.risk import DailyLossTracker
-from tradingagents.solana_bot.state import SCHEMA_VERSION, BotState, StateSchemaMismatch
+from tradingagents.solana_bot.state import STATE_VERSION, BotState, StateVersionMismatch
 from tradingagents.solana_bot.trade import OpenTrade
 
 pytestmark = pytest.mark.unit
@@ -69,24 +69,24 @@ def test_reset_clears_open_trade_and_file(tmp_path):
     assert state.last_candle_ts is None
 
 
-def test_save_stamps_current_schema_version(tmp_path):
+def test_save_stamps_current_state_version(tmp_path):
     path = tmp_path / "state.json"
     BotState(path=path, last_candle_ts=1).save()
     data = json.loads(path.read_text())
-    assert data["schema_version"] == SCHEMA_VERSION
+    assert data["state_version"] == STATE_VERSION
 
 
-def test_load_rejects_unknown_schema_version(tmp_path):
+def test_load_rejects_unknown_state_version(tmp_path):
     """A state file from a future (or corrupted) schema must surface loudly."""
     path = tmp_path / "state.json"
     path.write_text(json.dumps({
-        "schema_version": SCHEMA_VERSION + 1,
+        "state_version": STATE_VERSION + 1,
         "open_trade": None,
         "last_candle_ts": None,
         "tracker": None,
         "extras": {},
     }))
-    with pytest.raises(StateSchemaMismatch):
+    with pytest.raises(StateVersionMismatch):
         BotState.load(path)
 
 

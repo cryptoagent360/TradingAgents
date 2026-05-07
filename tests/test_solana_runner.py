@@ -52,10 +52,77 @@ def test_runner_opens_trade_when_setup_fires(tmp_path):
         max_cycles=1,
         sleeper=lambda *_: None,
         fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
     )
     assert state.has_open_trade()
     # State persisted to disk.
     assert cfg.state_path.exists()
+
+
+def test_runner_blocks_trade_when_ai_rejects(tmp_path):
+    """Valid setup but AI says REJECT — no trade opened, state clean."""
+    df = _fixture_df()
+    cfg = BotConfig(rsi_long_min=0.0, rsi_long_max=100.0, home_dir=tmp_path)
+
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "REJECT",
+        execute_trades=True,
+    )
+    assert not state.has_open_trade()
+
+
+def test_runner_blocks_trade_when_execute_disabled(tmp_path):
+    """AI approves but EXECUTE_TRADES is off — simulation only, no trade."""
+    df = _fixture_df()
+    cfg = BotConfig(rsi_long_min=0.0, rsi_long_max=100.0, home_dir=tmp_path)
+
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=False,
+    )
+    assert not state.has_open_trade()
+
+
+def test_runner_calls_ai_only_after_signal_fires(tmp_path):
+    """The AI filter must NOT be called on bars where the signal doesn't fire."""
+    flat = pd.DataFrame(
+        {
+            "timestamp": np.arange(260) * 3600 * 1000,
+            "open": [100.0] * 260,
+            "high": [101.0] * 260,
+            "low": [99.0] * 260,
+            "close": [100.0] * 260,
+            "volume": [1000.0] * 260,
+        }
+    )
+    cfg = BotConfig(home_dir=tmp_path)
+    calls = []
+
+    def spy(market_data):
+        calls.append(market_data)
+        return "APPROVE"
+
+    run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: flat,
+        ai_filter=spy,
+        execute_trades=True,
+    )
+    assert calls == [], "AI filter must not run when there is no setup"
 
 
 def test_runner_skips_when_no_setup(tmp_path):
@@ -91,6 +158,8 @@ def test_runner_resumes_open_trade_from_disk(tmp_path):
         max_cycles=1,
         sleeper=lambda *_: None,
         fetcher=lambda _cfg, _n: df,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
     )
     # Restart: load state from disk and run another cycle. Simulate a bar
     # with a higher timestamp so the new bar is processed.
@@ -102,6 +171,8 @@ def test_runner_resumes_open_trade_from_disk(tmp_path):
         max_cycles=1,
         sleeper=lambda *_: None,
         fetcher=lambda _cfg, _n: next_bar,
+        ai_filter=lambda _md: "APPROVE",
+        execute_trades=True,
     )
     # Trade should still be open (or just closed by management).
     assert state.tracker is not None

@@ -11,6 +11,8 @@ ceiling, and the reconcile() interface.
 from __future__ import annotations
 
 import logging
+import math
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -18,6 +20,22 @@ from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.trade import FillEvent, OpenTrade
 
 logger = logging.getLogger(__name__)
+
+
+def _floor_to_step(value: float, step: float) -> float:
+    """Round ``value`` DOWN to the nearest multiple of ``step``.
+
+    Used for both price (tick size) and amount (lot size). Floor — never
+    round up — so the resulting size never exceeds the intended size and
+    we never accidentally bust through min notional from the wrong side.
+    """
+    if step <= 0:
+        return value
+    return math.floor(value / step) * step
+
+
+class BelowMinNotional(Exception):
+    """Order would be smaller than the exchange's min notional — refuse."""
 
 
 @dataclass
@@ -176,14 +194,117 @@ class LiveEngine:
             open_orders=open_orders,
         )
 
-    def open_long(self, *, entry_price: float, size: float, atr_value: float) -> OpenTrade:
-        raise NotImplementedError(
-            "LiveEngine.open_long lands in the next commit (market entry + OCO bracket). "
-            "For now use PaperEngine."
+    def _market(self) -> dict:
+        """ccxt market metadata for the configured symbol — cached after first load."""
+        markets = self._client.load_markets()
+        try:
+            return markets[self.config.symbol]
+        except KeyError as exc:
+            raise ValueError(f"unknown symbol on exchange: {self.config.symbol}") from exc
+
+    def _round_amount(self, amount: float) -> float:
+        market = self._market()
+        step = float(market.get("limits", {}).get("amount", {}).get("min", 0)) or float(
+            market.get("precision", {}).get("amount", 0)
         )
+        return _floor_to_step(amount, step) if step else amount
+
+    def _round_price(self, price: float) -> float:
+        market = self._market()
+        step = float(market.get("limits", {}).get("price", {}).get("min", 0)) or float(
+            market.get("precision", {}).get("price", 0)
+        )
+        return _floor_to_step(price, step) if step else price
+
+    def _check_min_notional(self, amount: float, price: float) -> None:
+        market = self._market()
+        min_cost = float(market.get("limits", {}).get("cost", {}).get("min", 0) or 0)
+        notional = amount * price
+        if min_cost and notional < min_cost:
+            raise BelowMinNotional(
+                f"intended notional ({notional:.4f} {self.config.symbol.split('/')[1]}) "
+                f"is below the exchange minimum ({min_cost:.4f}). Either raise size or "
+                f"the per-trade risk_pct."
+            )
+
+    @staticmethod
+    def _client_order_id(prefix: str) -> str:
+        """Generate an idempotent client order ID. Re-submitting the same ID is a no-op
+        on Binance — protects against duplicate orders on retry."""
+        return f"sb-{prefix}-{uuid.uuid4().hex[:16]}"
+
+    def open_long(self, *, entry_price: float, size: float, atr_value: float) -> OpenTrade:
+        """Place a market-buy entry plus a protective stop-loss order.
+
+        TP1/TP2 placement and the OCO sibling-cancel dance land in a
+        follow-up commit. The bot's runner.manage() polls for fills via
+        reconcile() and handles the partial-exit + trailing logic against
+        the exchange directly.
+        """
+        size = self._round_amount(size)
+        if size <= 0:
+            raise BelowMinNotional("rounded size collapsed to 0 — increase risk_pct or balance")
+        rounded_entry = self._round_price(entry_price)
+        self._check_min_notional(size, rounded_entry)
+
+        stop_price = self._round_price(entry_price - self.config.atr_mult * atr_value)
+        if stop_price <= 0:
+            raise ValueError(f"computed stop_price={stop_price} is non-positive")
+
+        entry_coid = self._client_order_id("entry")
+        entry_order = self._client.create_order(
+            symbol=self.config.symbol,
+            type="market",
+            side="buy",
+            amount=size,
+            params={"newClientOrderId": entry_coid},
+        )
+
+        # Place a protective stop-loss covering the full filled size. We use
+        # STOP_LOSS_LIMIT (Binance spot) so we control the worst-case fill.
+        stop_coid = self._client_order_id("stop")
+        stop_order = self._client.create_order(
+            symbol=self.config.symbol,
+            type="STOP_LOSS_LIMIT",
+            side="sell",
+            amount=size,
+            price=stop_price,
+            params={
+                "newClientOrderId": stop_coid,
+                "stopPrice": stop_price,
+                "timeInForce": "GTC",
+            },
+        )
+
+        trade = OpenTrade.open_long(
+            entry=rounded_entry,
+            atr_value=atr_value,
+            size=size,
+            atr_mult=self.config.atr_mult,
+            tp1_r=self.config.tp1_r,
+            tp2_r=self.config.tp2_r,
+            tp1_close_fraction=self.config.tp1_close_fraction,
+            tp2_close_fraction=self.config.tp2_close_fraction,
+            trail_atr_mult=self.config.trail_atr_mult,
+        )
+
+        # Surface the order IDs for the caller to persist into BotState.
+        # The runner stuffs these into state.extras["live_order_ids"] so a
+        # crash + restart can re-find the orders via fetch_order(coid).
+        self.last_order_ids = {
+            "entry": entry_coid,
+            "entry_exchange_id": entry_order.get("id"),
+            "stop": stop_coid,
+            "stop_exchange_id": stop_order.get("id"),
+        }
+        logger.info(
+            "LIVE LONG opened: size=%.6f entry=%.4f stop=%.4f entry_coid=%s stop_coid=%s",
+            size, rounded_entry, stop_price, entry_coid, stop_coid,
+        )
+        return trade
 
     def manage(self, trade: OpenTrade, *, high: float, low: float, close: float) -> PaperFillReport:
         raise NotImplementedError(
-            "LiveEngine.manage lands in the next commit (poll fills, update OpenTrade). "
-            "For now use PaperEngine."
+            "LiveEngine.manage lands in the next commit (poll fills, OCO sibling-cancel "
+            "after TP1, trailing stop replacement). For now use PaperEngine."
         )

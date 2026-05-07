@@ -7,11 +7,13 @@ import pytest
 
 from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.execution import (
+    BelowMinNotional,
     LiveBalanceTooLarge,
     LiveEngine,
     PaperEngine,
     ReconcileReport,
     WithdrawPermissionEnabled,
+    _floor_to_step,
 )
 
 pytestmark = pytest.mark.unit
@@ -58,6 +60,23 @@ def _safe_client(quote_balance: float = 50.0, withdraw: bool = False) -> MagicMo
         "SOL": {"free": 0.0, "used": 0.0, "total": 0.0},
     }
     client.fetch_open_orders.return_value = []
+    # Realistic Binance SOL/USDT-style market metadata.
+    client.load_markets.return_value = {
+        "SOL/USDT": {
+            "precision": {"amount": 0.01, "price": 0.001},
+            "limits": {
+                "amount": {"min": 0.01},
+                "price": {"min": 0.001},
+                "cost": {"min": 5.0},
+            },
+        },
+    }
+    # create_order returns whatever the exchange returns; tests don't care about shape
+    # except for the exchange order id field.
+    client.create_order.side_effect = lambda **kwargs: {
+        "id": f"exch-{kwargs.get('params', {}).get('newClientOrderId', 'unk')}",
+        "info": kwargs,
+    }
     return client
 
 
@@ -80,12 +99,91 @@ def test_live_engine_refuses_balance_above_ceiling():
         LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=_safe_client(quote_balance=500.0))
 
 
-def test_live_engine_open_long_still_raises_until_orders_land():
+def test_floor_to_step_rounds_down_never_up():
+    assert _floor_to_step(0.123456, 0.01) == 0.12
+    assert _floor_to_step(99.9999, 0.001) == 99.999
+    assert _floor_to_step(5.0, 1.0) == 5.0
+    # Step of 0 (or negative) is a degenerate "no rounding".
+    assert _floor_to_step(3.14159, 0.0) == 3.14159
+
+
+def test_live_engine_open_long_places_market_entry_and_stop_loss():
+    cfg = BotConfig(max_live_balance=100.0, atr_mult=1.5)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+    trade = engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+
+    # Two orders placed: market entry + protective stop.
+    assert client.create_order.call_count == 2
+    calls = client.create_order.call_args_list
+    entry_call = calls[0].kwargs
+    stop_call = calls[1].kwargs
+
+    # Entry: market buy.
+    assert entry_call["type"] == "market"
+    assert entry_call["side"] == "buy"
+    assert entry_call["amount"] == 0.1
+    assert entry_call["params"]["newClientOrderId"].startswith("sb-entry-")
+
+    # Stop: STOP_LOSS_LIMIT sell at entry - atr_mult * atr = 100 - 1.5*2 = 97.0.
+    assert stop_call["type"] == "STOP_LOSS_LIMIT"
+    assert stop_call["side"] == "sell"
+    assert stop_call["amount"] == 0.1
+    assert stop_call["price"] == 97.0
+    assert stop_call["params"]["stopPrice"] == 97.0
+    assert stop_call["params"]["newClientOrderId"].startswith("sb-stop-")
+
+    # Trade is well-formed; order IDs are surfaced for the runner to persist.
+    assert trade.entry == 100.0
+    assert trade.size == 0.1
+    assert engine.last_order_ids["entry"].startswith("sb-entry-")
+    assert engine.last_order_ids["stop"].startswith("sb-stop-")
+
+
+def test_live_engine_open_long_rounds_size_to_market_lot_step():
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+    # 0.123 with lot step 0.01 must floor to 0.12.
+    engine.open_long(entry_price=100.0, size=0.123, atr_value=2.0)
+    assert client.create_order.call_args_list[0].kwargs["amount"] == 0.12
+
+
+def test_live_engine_open_long_refuses_below_min_notional():
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+    # 0.01 SOL * $100 = $1 — well below the $5 min_notional in the fixture.
+    with pytest.raises(BelowMinNotional):
+        engine.open_long(entry_price=100.0, size=0.01, atr_value=2.0)
+    # No orders placed.
+    assert client.create_order.call_count == 0
+
+
+def test_live_engine_uses_distinct_idempotent_order_ids():
+    cfg = BotConfig(max_live_balance=100.0)
+    client = _safe_client(50.0)
+    engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=client)
+
+    engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+    first = dict(engine.last_order_ids)
+    engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+    second = dict(engine.last_order_ids)
+    # Each call gets a fresh client_order_id — re-submitting the same one would
+    # be a no-op on Binance (idempotency guarantee), but new trades need new IDs.
+    assert first["entry"] != second["entry"]
+    assert first["stop"] != second["stop"]
+
+
+def test_live_engine_manage_still_raises_until_orders_land():
     cfg = BotConfig(max_live_balance=100.0)
     engine = LiveEngine(cfg, api_key="k", api_secret="s", testnet=True, client=_safe_client(50.0))
-    with pytest.raises(NotImplementedError) as exc:
-        engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
-    assert "next commit" in str(exc.value)
+    trade = engine.open_long(entry_price=100.0, size=0.1, atr_value=2.0)
+    with pytest.raises(NotImplementedError):
+        engine.manage(trade, high=105.0, low=99.0, close=104.0)
 
 
 def test_live_engine_reconcile_returns_balances_and_open_orders():

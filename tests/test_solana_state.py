@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tradingagents.solana_bot.risk import DailyLossTracker
-from tradingagents.solana_bot.state import BotState
+from tradingagents.solana_bot.state import SCHEMA_VERSION, BotState, StateSchemaMismatch
 from tradingagents.solana_bot.trade import OpenTrade
 
 pytestmark = pytest.mark.unit
@@ -67,3 +67,45 @@ def test_reset_clears_open_trade_and_file(tmp_path):
     assert not path.exists()
     assert state.open_trade is None
     assert state.last_candle_ts is None
+
+
+def test_save_stamps_current_schema_version(tmp_path):
+    path = tmp_path / "state.json"
+    BotState(path=path, last_candle_ts=1).save()
+    data = json.loads(path.read_text())
+    assert data["schema_version"] == SCHEMA_VERSION
+
+
+def test_load_rejects_unknown_schema_version(tmp_path):
+    """A state file from a future (or corrupted) schema must surface loudly."""
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "schema_version": SCHEMA_VERSION + 1,
+        "open_trade": None,
+        "last_candle_ts": None,
+        "tracker": None,
+        "extras": {},
+    }))
+    with pytest.raises(StateSchemaMismatch):
+        BotState.load(path)
+
+
+def test_load_accepts_legacy_state_without_version(tmp_path):
+    """Files written before versioning landed must still load (treated as v1)."""
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "open_trade": None,
+        "last_candle_ts": 99,
+        "tracker": None,
+        "extras": {},
+    }))
+    loaded = BotState.load(path)
+    assert loaded.last_candle_ts == 99
+
+
+def test_save_creates_lock_file_alongside_state(tmp_path):
+    """The advisory lock file is created so multi-process writes serialise."""
+    path = tmp_path / "state.json"
+    BotState(path=path, last_candle_ts=1).save()
+    lock_path = path.with_suffix(".lock")
+    assert lock_path.exists(), "expected sibling .lock file"

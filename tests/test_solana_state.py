@@ -5,7 +5,12 @@ import json
 import pytest
 
 from tradingagents.solana_bot.risk import DailyLossTracker
-from tradingagents.solana_bot.state import STATE_VERSION, BotState, StateVersionMismatch
+from tradingagents.solana_bot.state import (
+    STATE_BACKUP_COUNT,
+    STATE_VERSION,
+    BotState,
+    StateVersionMismatch,
+)
 from tradingagents.solana_bot.trade import OpenTrade
 
 pytestmark = pytest.mark.unit
@@ -109,6 +114,37 @@ def test_save_creates_lock_file_alongside_state(tmp_path):
     BotState(path=path, last_candle_ts=1).save()
     lock_path = path.with_suffix(".lock")
     assert lock_path.exists(), "expected sibling .lock file"
+
+
+def test_save_writes_a_backup_snapshot(tmp_path):
+    """Each save copies the new state.json to backups/ for forensics + rollback."""
+    path = tmp_path / "state.json"
+    BotState(path=path, last_candle_ts=1).save()
+
+    backups = list((tmp_path / "backups").glob("state-*.json"))
+    assert len(backups) == 1
+    # Snapshot content matches the live state.
+    assert json.loads(backups[0].read_text()) == json.loads(path.read_text())
+
+
+def test_save_trims_old_backup_snapshots_to_retention_limit(tmp_path):
+    """After many saves only STATE_BACKUP_COUNT snapshots remain."""
+    path = tmp_path / "state.json"
+    state = BotState(path=path)
+    # Save more times than the retention limit. Sleep is unnecessary because
+    # the filename includes microseconds — sequential saves get distinct names.
+    for i in range(STATE_BACKUP_COUNT + 5):
+        state.last_candle_ts = i
+        state.save()
+
+    backups = sorted((tmp_path / "backups").glob("state-*.json"))
+    assert len(backups) == STATE_BACKUP_COUNT, (
+        f"expected exactly {STATE_BACKUP_COUNT} retained snapshots, got {len(backups)}"
+    )
+    # The retained snapshots should be the most recent ones — newest backup
+    # contains the latest last_candle_ts value.
+    newest = json.loads(backups[-1].read_text())
+    assert newest["last_candle_ts"] == STATE_BACKUP_COUNT + 4
 
 
 def test_load_quarantines_corrupt_file_and_returns_empty(tmp_path):

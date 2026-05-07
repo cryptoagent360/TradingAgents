@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from tradingagents.solana_bot.trade import OpenTrade
 logger = logging.getLogger(__name__)
 
 STATE_VERSION = 1
+STATE_BACKUP_COUNT = 10  # how many timestamped snapshots to retain in backups/
 
 try:
     import fcntl
@@ -107,6 +109,28 @@ class BotState:
                 except OSError:
                     pass
                 raise
+            # Snapshot the just-written state to backups/ (best-effort; a
+            # failure here must not abort the save itself, since the primary
+            # state file is already on disk).
+            try:
+                self._snapshot_backup()
+            except OSError as exc:
+                logger.warning("backup snapshot failed: %s", exc)
+
+    def _snapshot_backup(self) -> None:
+        backups_dir = self.path.parent / "backups"
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        snapshot_path = backups_dir / f"{self.path.stem}-{ts}.json"
+        shutil.copy2(self.path, snapshot_path)
+        # Trim oldest beyond STATE_BACKUP_COUNT. Sort lexicographically — the
+        # filename timestamp is ISO-ordered, so this matches chronological order.
+        existing = sorted(backups_dir.glob(f"{self.path.stem}-*.json"))
+        for stale in existing[:-STATE_BACKUP_COUNT]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
     @classmethod
     def load(cls, path: Path) -> "BotState":

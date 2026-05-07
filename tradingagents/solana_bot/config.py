@@ -41,6 +41,12 @@ class BotConfig:
 
     taker_fee: float = 0.001
 
+    # Live-trading safety: refuse to construct LiveEngine if the account's
+    # quote-currency balance exceeds this. Forces "tiny live capital only"
+    # at the start — operator must raise this constant intentionally as
+    # confidence grows. Default $100. Ignored by PaperEngine.
+    max_live_balance: float = 100.0
+
     home_dir: Path = field(default_factory=lambda: _HOME)
 
     @property

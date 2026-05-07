@@ -201,15 +201,26 @@ def _process_bar(
     execute_trades: bool,
     journal: TradeJournal,
 ) -> CycleResult:
+    # run_paper guarantees these are non-None by the time _process_bar is
+    # called: the loop primes state.tracker before the first cycle, and
+    # state.open_trade is whatever the prior cycle persisted (may be None,
+    # but only the has_open_trade() branch dereferences it). Make that
+    # invariant explicit with asserts so a future contributor calling
+    # _process_bar with an unprimed BotState fails loudly with a clear
+    # AssertionError instead of an AttributeError or silent type-check skip.
+    assert state.tracker is not None, "run_paper must prime state.tracker before calling _process_bar"
+
     if state.has_open_trade():
+        trade = state.open_trade
+        assert trade is not None  # implied by has_open_trade()
         report = engine.manage(
-            state.open_trade,  # type: ignore[arg-type]
+            trade,
             high=float(bar["high"]),
             low=float(bar["low"]),
             close=float(bar["close"]),
         )
         if report.fills:
-            state.tracker.record_pnl(report.realised_pnl)  # type: ignore[union-attr]
+            state.tracker.record_pnl(report.realised_pnl)
             trade_id = state.extras.get("current_trade_id", "")
             for ev in report.fills:
                 journal.record_fill(
@@ -221,13 +232,12 @@ def _process_bar(
             state.extras["current_trade_pnl"] = (
                 state.extras.get("current_trade_pnl", 0.0) + report.realised_pnl
             )
-            if state.open_trade.is_closed():  # type: ignore[union-attr]
+            if trade.is_closed():
                 # Close the trade lifecycle: write the close event then drop
                 # the trade-id keys from extras so the next open gets fresh ones.
                 total_pnl = state.extras.get("current_trade_pnl", report.realised_pnl)
-                trade = state.open_trade
-                r_per_unit = trade.entry - trade.initial_stop  # type: ignore[union-attr]
-                r_multiple = total_pnl / (r_per_unit * trade.size) if r_per_unit > 0 and trade.size > 0 else None  # type: ignore[union-attr]
+                r_per_unit = trade.entry - trade.initial_stop
+                r_multiple = total_pnl / (r_per_unit * trade.size) if r_per_unit > 0 and trade.size > 0 else None
                 journal.record_close(
                     trade_id=trade_id,
                     symbol=config.symbol,
@@ -240,7 +250,7 @@ def _process_bar(
             return CycleResult("managed", detail=f"{len(report.fills)} fill(s)", fills=report.fills, pnl=report.realised_pnl)
         return CycleResult("managed", detail="no fills this bar")
 
-    if not state.tracker.can_open_trade():  # type: ignore[union-attr]
+    if not state.tracker.can_open_trade():
         return CycleResult("kill_switch", detail="daily loss limit reached")
 
     signal = check_long_setup(enriched, config)

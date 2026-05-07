@@ -161,12 +161,11 @@ class BotState:
                     path, exc, quarantine,
                 )
                 return cls(path=path)
-        # The version field was renamed schema_version → state_version mid-flight.
-        # Accept either key on load (state_version wins if both present); missing
-        # both keys is treated as the current version, for backward compat with
-        # state files written before versioning landed. Any mismatch — including
-        # a future version we don't know about — is surfaced loudly.
-        version = data.get("state_version", data.get("schema_version", STATE_VERSION))
+        # Missing state_version (very early state files written before
+        # versioning landed) is accepted as the current version. Any other
+        # mismatch — including a future version we don't know about — is
+        # surfaced loudly.
+        version = data.get("state_version", STATE_VERSION)
         if version != STATE_VERSION:
             raise StateVersionMismatch(
                 f"state file at {path} has state_version={version}, "

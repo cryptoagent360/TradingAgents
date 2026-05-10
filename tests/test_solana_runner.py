@@ -150,7 +150,7 @@ def test_reconcile_clears_local_trade_when_exchange_has_no_position(tmp_path, mo
         quote_balance=100.0, base_balance=0.0, open_orders=[], is_live=True,
     )
 
-    _reconcile_or_die(state, fake_engine)
+    _reconcile_or_die(state, fake_engine, MagicMock())
 
     assert state.open_trade is None
     assert "current_trade_id" not in state.extras
@@ -170,8 +170,14 @@ def test_reconcile_refuses_to_start_when_exchange_has_unexpected_position(tmp_pa
         quote_balance=100.0, base_balance=2.5, open_orders=[], is_live=True,
     )
 
+    notifier = MagicMock()
     with pytest.raises(ReconcileMismatch):
-        _reconcile_or_die(state, fake_engine)
+        _reconcile_or_die(state, fake_engine, notifier)
+    # Operator must be paged before the bot refuses to start.
+    notifier.notify.assert_called_once()
+    args = notifier.notify.call_args.args
+    assert args[0] == "ERROR"
+    assert "ReconcileMismatch" in args[1]
 
 
 def test_reconcile_skips_drift_check_for_paper_engine(tmp_path):
@@ -195,8 +201,10 @@ def test_reconcile_skips_drift_check_for_paper_engine(tmp_path):
     )
 
     # Even though state has trade and "exchange" has none, paper mode is exempt.
-    _reconcile_or_die(state, paper_engine)
+    notifier = MagicMock()
+    _reconcile_or_die(state, paper_engine, notifier)
     assert state.open_trade is not None  # untouched
+    notifier.notify.assert_not_called()
 
 
 def test_runner_persists_live_engine_order_ids_into_state(tmp_path, monkeypatch):

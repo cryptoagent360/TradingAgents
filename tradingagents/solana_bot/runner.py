@@ -20,6 +20,7 @@ from sol_bot import ai_filter as ai_filter_module
 from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.data import fetch_latest_closed_bars, sleep_until_next_candle
 from tradingagents.solana_bot.execution import PaperEngine, ReconcileMismatch
+from tradingagents.solana_bot.notifications import TelegramNotifier
 from tradingagents.solana_bot.indicators import attach_indicators
 from tradingagents.solana_bot.journal import TradeJournal
 from tradingagents.solana_bot.risk import DailyLossTracker, position_size
@@ -71,6 +72,7 @@ def run_paper(
     ai_filter: Optional[Callable[[dict], str]] = None,
     execute_trades: Optional[bool] = None,
     journal: Optional[TradeJournal] = None,
+    notifier: Optional[TelegramNotifier] = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> BotState:
     """Run the paper-trade loop.
@@ -94,16 +96,17 @@ def run_paper(
     ai = ai_filter if ai_filter is not None else ai_filter_module.ai_trade_filter
     execute = execute_trades if execute_trades is not None else ai_filter_module.EXECUTE_TRADES
     log = journal if journal is not None else TradeJournal(config.journal_path)
+    notify = notifier if notifier is not None else TelegramNotifier()
 
     with state.acquire_runner_lock():
-        _reconcile_or_die(state, engine)
+        _reconcile_or_die(state, engine, notify)
         return _run_loop(
             state, engine, config, fetch, ai, execute, log, sleeper,
-            max_cycles, max_runtime_s, monotonic,
+            max_cycles, max_runtime_s, monotonic, notify,
         )
 
 
-def _reconcile_or_die(state: BotState, engine) -> None:
+def _reconcile_or_die(state: BotState, engine, notifier: TelegramNotifier) -> None:
     """Reconcile local state against the exchange before the loop starts.
 
     Three drift cases against a live engine:
@@ -131,16 +134,20 @@ def _reconcile_or_die(state: BotState, engine) -> None:
         state.extras.pop("current_trade_pnl", None)
         state.save()
     elif not state_has_trade and exchange_has_position:
-        raise ReconcileMismatch(
+        msg = (
             f"exchange shows base balance {report.base_balance:.6f} or "
             f"{len(report.open_orders)} open orders, but local state has no "
             f"open trade. Refusing to start; investigate manually before clearing."
         )
+        # Page the operator before raising — this state will block the bot
+        # from running until manual intervention.
+        notifier.notify("ERROR", f"ReconcileMismatch: {msg}")
+        raise ReconcileMismatch(msg)
     else:
         logger.info("reconcile OK: state and exchange agree")
 
 
-def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles, max_runtime_s, monotonic):
+def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles, max_runtime_s, monotonic, notifier):
     cycle = 0
     started = monotonic()
     while True:
@@ -157,6 +164,11 @@ def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_c
             logger.warning("kill switch active and no open trade — exiting loop")
             state.extras["last_cycle"] = "kill_switch_exit"
             state.save()
+            notifier.notify(
+                "WARN",
+                f"daily-loss kill switch tripped (PnL today: {state.tracker.today_pnl:.2f}). "
+                f"Bot exited; restart manually after review.",
+            )
             return state
 
         df = fetch(config, config.min_bars + 5)
@@ -188,6 +200,11 @@ def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_c
         logger.info("cycle %d: %s — %s", cycle, result.action, result.detail)
 
         if not state.tracker.can_open_trade() and not state.has_open_trade():
+            notifier.notify(
+                "WARN",
+                f"daily-loss kill switch tripped after cycle {cycle} "
+                f"(PnL today: {state.tracker.today_pnl:.2f}). Bot exited.",
+            )
             return state
 
         if max_cycles is None:

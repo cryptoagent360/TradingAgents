@@ -16,6 +16,7 @@ defaults (no CLI flags, since this is meant to run unattended):
     BOT_SYMBOL            trading pair (default SOL/USDT)
     BOT_TIMEFRAME         candle timeframe (default 1h)
     BOT_BURN_IN_HOURS     wall-clock budget; loop exits after N hours (default unlimited)
+    TRADING_MODE          "paper" (default) or "live" (refused until LiveEngine wired)
 """
 
 from __future__ import annotations
@@ -39,6 +40,18 @@ def main() -> int:
         stream=sys.stdout,
     )
     log = logging.getLogger(__name__)
+
+    # TRADING_MODE is the explicit operator opt-in for the runtime mode.
+    # "live" is intentionally refused here until LiveEngine is fully wired
+    # into the runner — half-built live mode is more dangerous than no
+    # live mode. Bumping the supported set is a deliberate code change.
+    trading_mode = os.environ.get("TRADING_MODE", "paper").strip().lower()
+    if trading_mode != "paper":
+        log.error(
+            "TRADING_MODE=%r is not supported in this build; only 'paper' is wired. "
+            "Refusing to start.", trading_mode,
+        )
+        return 2
 
     config = BotConfig(
         symbol=os.getenv("BOT_SYMBOL", "SOL/USDT"),

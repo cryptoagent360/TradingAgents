@@ -283,6 +283,27 @@ def test_runner_writes_open_event_to_journal(tmp_path):
     assert isinstance(open_events[0]["bar_timestamp"], int)
 
 
+def test_runner_opens_trade_with_no_ai_filter_when_not_supplied(tmp_path):
+    """Default behavior: when run_paper is called without ai_filter, no AI gate
+    runs and the trade fires on the 5/5 strategy gate alone. This is the
+    intentional opt-in default after the AI-disable cleanup."""
+    df = _fixture_df()
+    cfg = BotConfig(rsi_long_min=0.0, rsi_long_max=100.0, home_dir=tmp_path)
+
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=1,
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: df,
+        # ai_filter omitted on purpose — default is no AI gate
+        execute_trades=True,
+    )
+    assert state.has_open_trade(), (
+        "with no ai_filter passed, the trade should open on the strategy gate alone"
+    )
+
+
 def test_runner_calls_ai_only_after_signal_fires(tmp_path):
     """The AI filter must NOT be called on bars where the signal doesn't fire."""
     flat = pd.DataFrame(

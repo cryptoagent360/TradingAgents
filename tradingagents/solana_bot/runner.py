@@ -82,18 +82,26 @@ def run_paper(
     (e.g. 72h before promoting to live). Whichever limit fires first
     ends the loop. ``sleeper`` and ``fetcher`` are injectable so tests
     can drive the loop deterministically without sleeping or hitting
-    the network. ``ai_filter`` and ``execute_trades`` are also
-    injectable so tests can pin both gates without hitting Claude or
-    the env. ``journal`` is injectable so tests can point the trade
-    ledger at tmp_path. ``monotonic`` is injectable so tests can
-    fast-forward the burn-in clock.
+    the network. ``execute_trades`` is injectable so tests can pin the
+    gate without touching env. ``journal`` is injectable so tests can
+    point the trade ledger at tmp_path. ``monotonic`` is injectable so
+    tests can fast-forward the burn-in clock.
+
+    ``ai_filter`` is OPT-IN: when ``None`` (the default), the AI gate
+    is skipped entirely and trades fire on the 5/5 strategy gate alone.
+    Pass ``ai_filter=sol_bot.ai_filter.ai_trade_filter`` to re-enable
+    Claude-powered approval; pass a stub to test specific paths.
     """
     state = BotState.load(config.state_path)
     if state.tracker is None:
         state.tracker = DailyLossTracker(starting_balance=starting_balance, max_daily_loss_pct=config.max_daily_loss_pct)
     engine = PaperEngine(config=config, balance=starting_balance + state.tracker.today_pnl)
     fetch = fetcher if fetcher is not None else (lambda cfg, n: fetch_latest_closed_bars(cfg, n))
-    ai = ai_filter if ai_filter is not None else ai_filter_module.ai_trade_filter
+    # AI filter is OPT-IN as of the ai-disable cleanup. If the caller doesn't
+    # pass one, no AI gate runs and trades fire on the 5/5 strategy gate alone.
+    # The sol_bot.ai_filter module is still importable; to re-enable, pass
+    # `ai_filter=sol_bot.ai_filter.ai_trade_filter` at the call site.
+    ai = ai_filter
     execute = execute_trades if execute_trades is not None else ai_filter_module.EXECUTE_TRADES
     log = journal if journal is not None else TradeJournal(config.journal_path)
     notify = notifier if notifier is not None else TelegramNotifier()
@@ -218,7 +226,7 @@ def _process_bar(
     bar,
     config: BotConfig,
     *,
-    ai_filter: Callable[[dict], str],
+    ai_filter: Optional[Callable[[dict], str]],
     execute_trades: bool,
     journal: TradeJournal,
     cycle_number: Optional[int] = None,
@@ -284,11 +292,16 @@ def _process_bar(
     if not signal.is_long:
         return CycleResult("no_setup", detail=signal.reason)
 
-    market_data = _build_ai_market_data(bar, config)
-    decision = ai_filter(market_data)
-    logger.info("AI filter decision: %s", decision)
-    if decision != "APPROVE":
-        return CycleResult("ai_rejected", detail=f"AI {decision}")
+    # AI filter is opt-in. If the caller passed one, run it as a hard veto;
+    # otherwise the 5/5 strategy gate stands alone and we proceed straight
+    # to the EXECUTE_TRADES check. To re-enable, pass `ai_filter=...` to
+    # run_paper (e.g. `sol_bot.ai_filter.ai_trade_filter`).
+    if ai_filter is not None:
+        market_data = _build_ai_market_data(bar, config)
+        decision = ai_filter(market_data)
+        logger.info("AI filter decision: %s", decision)
+        if decision != "APPROVE":
+            return CycleResult("ai_rejected", detail=f"AI {decision}")
 
     if not execute_trades:
         logger.info("SIMULATION: would open LONG (EXECUTE_TRADES disabled)")

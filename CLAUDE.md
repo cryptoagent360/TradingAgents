@@ -50,8 +50,11 @@ direct the operator to use `.\start_bot.ps1`, not the bare python invocation.
   injectable clock; `cycle_number` / `bar_timestamp` fields on every record.
 - `tradingagents/solana_bot/notifications.py` — stdlib-only Telegram
   notifier; no-op when creds blank; never raises into the trading loop.
-- `sol_bot/ai_filter.py` — Claude-powered binary APPROVE/REJECT gate;
-  `EXECUTE_TRADES = False` is a hardcoded source-edit kill switch.
+- `sol_bot/ai_filter.py` — Claude-powered binary APPROVE/REJECT gate.
+  **OPT-IN as of commit `<this-cleanup>`** — the runner does not call it
+  by default. To re-enable, pass `ai_filter=ai_trade_filter` to
+  `run_paper(...)` at the call site. `EXECUTE_TRADES = False` is the
+  separate hardcoded source-edit kill switch (still in this file).
 - `bot.py` (repo root) — unattended entry; loads `.env`; `TRADING_MODE`
   preflight refuses anything but `paper` until LiveEngine is fully wired.
 

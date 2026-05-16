@@ -1,41 +1,33 @@
 """Execution engines.
 
-``PaperEngine`` simulates fills against bar OHLC and is fine for
-backtests and paper-trading burn-in. ``LiveEngine`` talks to a real
-exchange (Binance spot via ccxt) and places real orders. Order
-placement itself lands in a follow-up commit; this commit ships the
-foundation: constructor, withdraw-permission check, tiny-capital
-ceiling, and the reconcile() interface.
+``PaperEngine`` simulates fills against bar OHLC and is the engine the
+runner uses today. ``LiveEngine`` is intentionally a stub — it will be
+re-introduced in a focused follow-up PR that ships the full live path
+together (market entry + STOP/TP placement + manage() with OCO
+sibling-cancel + reconcile-with-fills + crash-recovery integration).
+
+The partial LiveEngine that lived here previously was reverted because
+a half-built engine in production code is more dangerous than no
+engine: the constructor would succeed against testnet but ``manage()``
+raised ``NotImplementedError`` on the second cycle, meaning a live
+trade could be opened with no exit-management path. Clean slate is
+safer than mixed state.
+
+``ReconcileReport`` and ``ReconcileMismatch`` are kept here because the
+runner's ``_reconcile_or_die`` startup check uses them; they're the
+seam the future LiveEngine plugs into.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-import uuid
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import List
 
 from tradingagents.solana_bot.config import BotConfig
 from tradingagents.solana_bot.trade import FillEvent, OpenTrade
 
 logger = logging.getLogger(__name__)
-
-
-def _floor_to_step(value: float, step: float) -> float:
-    """Round ``value`` DOWN to the nearest multiple of ``step``.
-
-    Used for both price (tick size) and amount (lot size). Floor — never
-    round up — so the resulting size never exceeds the intended size and
-    we never accidentally bust through min notional from the wrong side.
-    """
-    if step <= 0:
-        return value
-    return math.floor(value / step) * step
-
-
-class BelowMinNotional(Exception):
-    """Order would be smaller than the exchange's min notional — refuse."""
 
 
 @dataclass
@@ -53,19 +45,11 @@ class ReconcileReport:
     quote_balance: float
     base_balance: float
     open_orders: List[dict] = field(default_factory=list)
-    is_live: bool = False  # PaperEngine returns False; LiveEngine returns True
+    is_live: bool = False  # PaperEngine returns False; future LiveEngine returns True
 
 
 class ReconcileMismatch(Exception):
     """Raised at runner startup if local state and exchange state disagree."""
-
-
-class WithdrawPermissionEnabled(Exception):
-    """Raised at LiveEngine construction if the API key has withdraw access."""
-
-
-class LiveBalanceTooLarge(Exception):
-    """Raised at LiveEngine construction if the account exceeds max_live_balance."""
 
 
 class PaperEngine:
@@ -117,244 +101,31 @@ class PaperEngine:
 
 
 class LiveEngine:
-    """Live execution against Binance spot via ccxt.
+    """Live execution — intentionally not implemented in this release.
 
-    Two safety gates fire at construction:
+    Will be rebuilt as a coherent unit in a follow-up PR:
 
-    * The API key must NOT have withdraw permission. We probe via
-      ``client.fetch_account_permissions()`` (Binance exposes this);
-      anything other than withdraw=False raises ``WithdrawPermissionEnabled``.
-    * The account's quote-currency balance must not exceed
-      ``config.max_live_balance``. This forces "tiny live capital only"
-      at the start of the operator's live journey — they must raise the
-      ceiling intentionally as confidence grows.
+    * Constructor with withdraw + internal-transfer permission refusal
+    * Tiny-capital balance ceiling check at construction *and* per trade
+    * Exchange-precision rounding (lot step, tick size) before order placement
+    * Min-notional check before sending to the exchange
+    * Deterministic ``client_order_id`` derived from ``(trade_id, leg)`` for
+      true network-retry idempotency
+    * Market entry with actual-fill-price tracking (not planned-entry slippage)
+    * STOP_LOSS_LIMIT (or STOP_MARKET — operator choice) placement, with the
+      open-position-with-no-stop window minimised via a try/flatten-on-failure wrapper
+    * TP1 + TP2 limit orders, with OCO sibling-cancel after partial fills
+    * Trailing-stop replacement as the runner trail advances
+    * ``reconcile()`` returning balance + open orders + position size
+    * ``manage()`` polling fills via the exchange API and reporting via the same
+      ``PaperFillReport`` shape the runner already consumes
 
-    Order placement (``open_long`` and ``manage``) lands in the next
-    commit. ``reconcile()`` works today.
+    Until that PR lands, this class refuses to instantiate. The runner
+    only ever constructs ``PaperEngine``.
     """
 
-    def __init__(
-        self,
-        config: BotConfig,
-        api_key: str,
-        api_secret: str,
-        *,
-        testnet: bool = True,
-        client: Optional[Any] = None,
-    ):
-        self.config = config
-        self._client = client if client is not None else self._build_client(api_key, api_secret, testnet)
-        self._market_cache: Optional[dict] = None  # populated on first _market() call
-        self._check_permissions()
-        self._check_balance_ceiling()
-        logger.info(
-            "LiveEngine ready: testnet=%s symbol=%s max_live_balance=%.2f",
-            testnet, config.symbol, config.max_live_balance,
-        )
-
-    @staticmethod
-    def _build_client(api_key: str, api_secret: str, testnet: bool):
-        import ccxt
-        client = ccxt.binance({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-        })
-        if testnet:
-            client.set_sandbox_mode(True)
-        return client
-
-    def _check_permissions(self) -> None:
-        """Refuse to operate if the API key can move funds anywhere.
-
-        Two flags matter: ``withdraw`` (off-platform) and ``transfer`` /
-        ``enableInternalTransfer`` (between Binance accounts — drains funds
-        just as effectively as a withdraw). DEFAULT to True (assume the worst)
-        if a flag is missing from the response — safer than the previous
-        default-False which silently passed empty/unexpected responses.
-        """
-        perms = self._client.fetch_account_permissions() or {}
-        withdraw_enabled = perms.get("withdraw", perms.get("enableWithdrawals", True))
-        transfer_enabled = perms.get(
-            "transfer", perms.get("enableInternalTransfer", False)
-        )
-        if withdraw_enabled:
-            raise WithdrawPermissionEnabled(
-                "the configured API key has (or may have) withdraw permission — "
-                "refusing to operate. Generate a trade-only key (no withdraw, no "
-                "internal transfer) and restart. If the exchange does not expose "
-                "fetch_account_permissions and you have manually verified the key "
-                "is trade-only, set perms.withdraw=False explicitly in the response."
-            )
-        if transfer_enabled:
-            raise WithdrawPermissionEnabled(
-                "the configured API key has internal-transfer permission — refusing "
-                "to operate. Internal transfer can move funds to another Binance "
-                "account just as effectively as a withdraw. Disable it and restart."
-            )
-
-    def _check_balance_ceiling(self) -> None:
-        """Refuse if the account holds more quote currency than the safety ceiling."""
-        report = self.reconcile()
-        if report.quote_balance > self.config.max_live_balance:
-            raise LiveBalanceTooLarge(
-                f"account quote balance ({report.quote_balance:.2f}) exceeds "
-                f"max_live_balance ({self.config.max_live_balance:.2f}). "
-                f"Either reduce the account balance or raise max_live_balance "
-                f"in BotConfig deliberately."
-            )
-
-    def reconcile(self) -> ReconcileReport:
-        balance = self._client.fetch_balance()
-        base, quote = self.config.symbol.split("/")
-        quote_balance = float(balance.get(quote, {}).get("free", 0.0))
-        base_balance = float(balance.get(base, {}).get("free", 0.0))
-        open_orders = self._client.fetch_open_orders(self.config.symbol)
-        return ReconcileReport(
-            quote_balance=quote_balance,
-            base_balance=base_balance,
-            open_orders=open_orders,
-            is_live=True,
-        )
-
-    def _market(self) -> dict:
-        """ccxt market metadata for the configured symbol — cached after first load.
-
-        load_markets() can be a real network call on some ccxt builds; the
-        helper methods (_round_amount, _round_price, _check_min_notional) are
-        called multiple times per open_long, so we cache the dict per-engine.
-        """
-        if self._market_cache is not None:
-            return self._market_cache
-        markets = self._client.load_markets()
-        try:
-            self._market_cache = markets[self.config.symbol]
-            return self._market_cache
-        except KeyError as exc:
-            raise ValueError(f"unknown symbol on exchange: {self.config.symbol}") from exc
-
-    def _round_amount(self, amount: float) -> float:
-        market = self._market()
-        step = float(market.get("limits", {}).get("amount", {}).get("min", 0)) or float(
-            market.get("precision", {}).get("amount", 0)
-        )
-        return _floor_to_step(amount, step) if step else amount
-
-    def _round_price(self, price: float) -> float:
-        market = self._market()
-        step = float(market.get("limits", {}).get("price", {}).get("min", 0)) or float(
-            market.get("precision", {}).get("price", 0)
-        )
-        return _floor_to_step(price, step) if step else price
-
-    def _check_min_notional(self, amount: float, price: float) -> None:
-        market = self._market()
-        min_cost = float(market.get("limits", {}).get("cost", {}).get("min", 0) or 0)
-        notional = amount * price
-        if min_cost and notional < min_cost:
-            raise BelowMinNotional(
-                f"intended notional ({notional:.4f} {self.config.symbol.split('/')[1]}) "
-                f"is below the exchange minimum ({min_cost:.4f}). Either raise size or "
-                f"the per-trade risk_pct."
-            )
-
-    @staticmethod
-    def _client_order_id(prefix: str) -> str:
-        """Generate an idempotent client order ID. Re-submitting the same ID is a no-op
-        on Binance — protects against duplicate orders on retry."""
-        return f"sb-{prefix}-{uuid.uuid4().hex[:16]}"
-
-    def open_long(self, *, entry_price: float, size: float, atr_value: float) -> OpenTrade:
-        """Place a market-buy entry plus a protective stop-loss order.
-
-        TP1/TP2 placement and the OCO sibling-cancel dance land in a
-        follow-up commit. The bot's runner.manage() polls for fills via
-        reconcile() and handles the partial-exit + trailing logic against
-        the exchange directly.
-        """
-        # Re-check the balance ceiling on every open — the constructor check
-        # is a one-shot, but the operator may have deposited mid-run or PnL
-        # may have accumulated. The "tiny live capital only" invariant is
-        # only meaningful if it's enforced per trade.
-        self._check_balance_ceiling()
-
-        size = self._round_amount(size)
-        if size <= 0:
-            raise BelowMinNotional("rounded size collapsed to 0 — increase risk_pct or balance")
-        rounded_entry = self._round_price(entry_price)
-        self._check_min_notional(size, rounded_entry)
-
-        stop_price = self._round_price(entry_price - self.config.atr_mult * atr_value)
-        if stop_price <= 0:
-            raise ValueError(f"computed stop_price={stop_price} is non-positive")
-
-        entry_coid = self._client_order_id("entry")
-        entry_order = self._client.create_order(
-            symbol=self.config.symbol,
-            type="market",
-            side="buy",
-            amount=size,
-            params={"newClientOrderId": entry_coid},
-        )
-
-        # Use the actual fill price ccxt reports, not the planned entry_price.
-        # On a fast move or a thin book the market order fills with slippage;
-        # if we use rounded_entry as the OpenTrade entry, R is mis-sized and
-        # all downstream stop/TP math is wrong. Fall back to rounded_entry
-        # when the exchange's response shape doesn't include average/price
-        # (e.g. partial info on testnet).
-        actual_entry = float(
-            entry_order.get("average") or entry_order.get("price") or rounded_entry
-        )
-
-        # Place a protective stop-loss covering the full filled size. We use
-        # STOP_LOSS_LIMIT (Binance spot) so we control the worst-case fill.
-        stop_coid = self._client_order_id("stop")
-        stop_order = self._client.create_order(
-            symbol=self.config.symbol,
-            type="STOP_LOSS_LIMIT",
-            side="sell",
-            amount=size,
-            price=stop_price,
-            params={
-                "newClientOrderId": stop_coid,
-                "stopPrice": stop_price,
-                "timeInForce": "GTC",
-            },
-        )
-
-        trade = OpenTrade.open_long(
-            entry=actual_entry,
-            atr_value=atr_value,
-            size=size,
-            atr_mult=self.config.atr_mult,
-            tp1_r=self.config.tp1_r,
-            tp2_r=self.config.tp2_r,
-            tp1_close_fraction=self.config.tp1_close_fraction,
-            tp2_close_fraction=self.config.tp2_close_fraction,
-            trail_atr_mult=self.config.trail_atr_mult,
-        )
-
-        # Surface the order IDs for the caller to persist into BotState.
-        # The runner stuffs these into state.extras["live_order_ids"] so a
-        # crash + restart can re-find the orders via fetch_order(coid).
-        self.last_order_ids = {
-            "entry": entry_coid,
-            "entry_exchange_id": entry_order.get("id"),
-            "stop": stop_coid,
-            "stop_exchange_id": stop_order.get("id"),
-        }
-        logger.info(
-            "LIVE LONG opened: size=%.6f entry=%.4f stop=%.4f entry_coid=%s stop_coid=%s "
-            "(planned_entry=%.4f, slippage=%.4f)",
-            size, actual_entry, stop_price, entry_coid, stop_coid,
-            rounded_entry, actual_entry - rounded_entry,
-        )
-        return trade
-
-    def manage(self, trade: OpenTrade, *, high: float, low: float, close: float) -> PaperFillReport:
+    def __init__(self, *_args, **_kwargs):
         raise NotImplementedError(
-            "LiveEngine.manage lands in the next commit (poll fills, OCO sibling-cancel "
-            "after TP1, trailing stop replacement). For now use PaperEngine."
+            "LiveEngine is intentionally stubbed in this release. Use PaperEngine. "
+            "Live trading lands in a focused follow-up PR — see the docstring for scope."
         )

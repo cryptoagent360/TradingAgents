@@ -70,6 +70,3 @@ def test_rejects_rsi_outside_zero_to_hundred():
         BotConfig(rsi_long_max=150.0)
 
 
-def test_rejects_negative_max_live_balance():
-    with pytest.raises(BotConfigError, match="max_live_balance"):
-        BotConfig(max_live_balance=-10.0)

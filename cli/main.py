@@ -1217,5 +1217,10 @@ def analyze(
     run_analysis(checkpoint=checkpoint)
 
 
+from cli.solana import solana_app
+
+app.add_typer(solana_app, name="solana")
+
+
 if __name__ == "__main__":
     app()

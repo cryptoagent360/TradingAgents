@@ -248,6 +248,23 @@ ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
 
+## Solana trend+pullback bot
+
+Alongside the LLM research agents, the repo ships a rule-based crypto
+execution bot under `tradingagents/solana_bot/`. It implements a
+trend + pullback strategy on SOL/USDT with a custom backtester and a
+paper-trade runner. Live execution is intentionally deferred to a
+follow-up PR — backtest and paper-trade first.
+
+```bash
+tradingagents solana backtest --symbol SOL/USDT --timeframe 1h \
+    --start 2025-01-01 --end 2026-05-01 --balance 10000
+tradingagents solana paper --symbol SOL/USDT --timeframe 1h --balance 10000
+```
+
+See [`tradingagents/solana_bot/README.md`](tradingagents/solana_bot/README.md)
+for the full strategy spec and pre-live checklist.
+
 ## Contributing
 
 We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).

@@ -1,0 +1,25 @@
+[Unit]
+Description=Solana trend+pullback bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/home/bot/TradingAgents
+EnvironmentFile=/home/bot/TradingAgents/.env
+ExecStart=/home/bot/TradingAgents/.venv/bin/python /home/bot/TradingAgents/bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/.tradingagents
+
+[Install]
+WantedBy=multi-user.target

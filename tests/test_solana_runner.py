@@ -96,6 +96,30 @@ def test_runner_blocks_trade_when_execute_disabled(tmp_path):
     assert not state.has_open_trade()
 
 
+def test_runner_exits_cleanly_when_stop_requested(tmp_path):
+    """SIGTERM-cooperative exit: when stop_requested() returns True, the
+    runner exits between cycles with state.extras["last_cycle"] == "sigterm_clean_exit"."""
+    flat = pd.DataFrame({
+        "timestamp": np.arange(260) * 3600 * 1000,
+        "open": [100.0] * 260,
+        "high": [101.0] * 260,
+        "low": [99.0] * 260,
+        "close": [100.0] * 260,
+        "volume": [1000.0] * 260,
+    })
+    cfg = BotConfig(home_dir=tmp_path)
+    state = run_paper(
+        cfg,
+        starting_balance=10_000,
+        max_cycles=5,  # cap so test terminates if the flag is ignored
+        sleeper=lambda *_: None,
+        fetcher=lambda _cfg, _n: flat,
+        execute_trades=True,
+        stop_requested=lambda: True,  # always asks for stop
+    )
+    assert state.extras.get("last_cycle") == "sigterm_clean_exit"
+
+
 def test_runner_exits_when_burn_in_budget_elapsed(tmp_path):
     """A 3h burn-in budget exits cleanly without a kill switch trip."""
     flat = pd.DataFrame(

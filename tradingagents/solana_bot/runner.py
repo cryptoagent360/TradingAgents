@@ -74,6 +74,8 @@ def run_paper(
     journal: Optional[TradeJournal] = None,
     notifier: Optional[TelegramNotifier] = None,
     monotonic: Callable[[], float] = time.monotonic,
+    engine: Optional[object] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ) -> BotState:
     """Run the paper-trade loop.
 
@@ -95,7 +97,12 @@ def run_paper(
     state = BotState.load(config.state_path)
     if state.tracker is None:
         state.tracker = DailyLossTracker(starting_balance=starting_balance, max_daily_loss_pct=config.max_daily_loss_pct)
-    engine = PaperEngine(config=config, balance=starting_balance + state.tracker.today_pnl)
+    # ``engine`` is injectable so bot.py / cli can plug in a LiveEngine while
+    # tests and paper-mode continue to use PaperEngine by default. The two
+    # engines share the open_long / manage / reconcile interface.
+    engine = engine if engine is not None else PaperEngine(
+        config=config, balance=starting_balance + state.tracker.today_pnl,
+    )
     fetch = fetcher if fetcher is not None else (lambda cfg, n: fetch_latest_closed_bars(cfg, n))
     # AI filter is OPT-IN as of the ai-disable cleanup. If the caller doesn't
     # pass one, no AI gate runs and trades fire on the 5/5 strategy gate alone.
@@ -106,11 +113,16 @@ def run_paper(
     log = journal if journal is not None else TradeJournal(config.journal_path)
     notify = notifier if notifier is not None else TelegramNotifier()
 
+    # SIGTERM-cooperative shutdown — bot.py installs a handler that flips
+    # the predicate to True; the loop checks it at the top of each cycle
+    # and exits cleanly between cycles rather than mid-API-call.
+    stop_check = stop_requested if stop_requested is not None else (lambda: False)
+
     with state.acquire_runner_lock():
         _reconcile_or_die(state, engine, notify)
         return _run_loop(
             state, engine, config, fetch, ai, execute, log, sleeper,
-            max_cycles, max_runtime_s, monotonic, notify,
+            max_cycles, max_runtime_s, monotonic, notify, stop_check,
         )
 
 
@@ -155,10 +167,15 @@ def _reconcile_or_die(state: BotState, engine, notifier: TelegramNotifier) -> No
         logger.info("reconcile OK: state and exchange agree")
 
 
-def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles, max_runtime_s, monotonic, notifier):
+def _run_loop(state, engine, config, fetch, ai, execute, journal, sleeper, max_cycles, max_runtime_s, monotonic, notifier, stop_requested):
     cycle = 0
     started = monotonic()
     while True:
+        if stop_requested():
+            logger.info("stop requested — exiting between cycles")
+            state.extras["last_cycle"] = "sigterm_clean_exit"
+            state.save()
+            return state
         if max_cycles is not None and cycle >= max_cycles:
             return state
         if max_runtime_s is not None and monotonic() - started >= max_runtime_s:

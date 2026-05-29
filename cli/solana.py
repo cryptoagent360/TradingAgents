@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -109,13 +110,49 @@ def paper(
 
 
 @solana_app.command("live")
-def live() -> None:
-    """Live execution is intentionally disabled in this release."""
-    console.print(
-        "[red]Live execution is intentionally not yet wired. "
-        "Run [bold]tradingagents solana backtest[/bold] and [bold]tradingagents solana paper[/bold] first.[/red]"
-    )
-    raise typer.Exit(code=2)
+def live(
+    symbol: str = typer.Option("SOL/USD", "--symbol", help="Kraken pair, e.g. SOL/USD"),
+    timeframe: str = typer.Option("1h", "--timeframe"),
+    balance: float = typer.Option(100.0, "--balance", help="Starting balance for bookkeeping (does NOT override exchange balance)"),
+    cycles: Optional[int] = typer.Option(None, "--cycles", help="Run only N cycles then exit (smoke test)"),
+    confirm: bool = typer.Option(
+        False, "--i-have-verified-trade-only-key",
+        help="REQUIRED. Acknowledges you have manually verified the Kraken API key has Trade permission only — no Withdraw, no Account Management.",
+    ),
+) -> None:
+    """Run the live-trade loop against Kraken with REAL money.
+
+    Refuses to start unless:
+    * EXECUTE_TRADES = True is committed in sol_bot/ai_filter.py
+    * --i-have-verified-trade-only-key flag is passed
+    * KRAKEN_API_KEY / KRAKEN_API_SECRET present in environment
+    * Account quote balance is at or below BotConfig.max_live_balance
+    """
+    from sol_bot.ai_filter import EXECUTE_TRADES
+    from tradingagents.solana_bot.execution import LiveEngine
+    from tradingagents.solana_bot.runner import run_paper as run_loop
+
+    if not EXECUTE_TRADES:
+        console.print("[red]EXECUTE_TRADES is False in sol_bot/ai_filter.py. Edit + commit before going live.[/red]")
+        raise typer.Exit(code=2)
+    if not confirm:
+        console.print("[red]Refusing to start without --i-have-verified-trade-only-key.[/red]")
+        raise typer.Exit(code=2)
+    api_key = os.environ.get("KRAKEN_API_KEY", "").strip()
+    api_secret = os.environ.get("KRAKEN_API_SECRET", "").strip()
+    if not api_key or not api_secret:
+        console.print("[red]KRAKEN_API_KEY and KRAKEN_API_SECRET must be set in environment.[/red]")
+        raise typer.Exit(code=2)
+
+    config = BotConfig(symbol=symbol, timeframe=timeframe, exchange="kraken", confirm_trade_only_key=True)
+    console.print(f"[red bold]LIVE MODE[/red bold] {symbol} {timeframe} — max_live_balance={config.max_live_balance:.2f}")
+    engine = LiveEngine(config=config, api_key=api_key, api_secret=api_secret)
+    state = run_loop(config, starting_balance=balance, max_cycles=cycles, engine=engine, execute_trades=True)
+    if state.tracker is not None:
+        console.print(
+            f"\n[bold]Today PnL:[/bold] {state.tracker.today_pnl:.2f} "
+            f"(kill switch: {state.tracker.kill_switch_triggered})"
+        )
 
 
 __all__ = ["solana_app"]

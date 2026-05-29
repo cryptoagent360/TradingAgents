@@ -18,7 +18,15 @@ def test_solana_help_shows_subcommands():
     assert "paper" in result.stdout
 
 
-def test_solana_live_subcommand_refuses():
+def test_solana_live_subcommand_refuses_without_explicit_acks():
+    """Live invocation without --i-have-verified-trade-only-key OR with
+    EXECUTE_TRADES=False refuses cleanly. The shipped default has
+    EXECUTE_TRADES=False so this is the path that fires here."""
     result = runner.invoke(app, ["solana", "live"])
     assert result.exit_code == 2
-    assert "not yet wired" in result.stdout or "Live execution" in result.stdout
+    # Refuses for either of the two valid reasons depending on shipped defaults.
+    assert (
+        "EXECUTE_TRADES" in result.stdout
+        or "trade-only-key" in result.stdout
+        or "Refusing to start" in result.stdout
+    )

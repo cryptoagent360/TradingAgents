@@ -12,12 +12,16 @@ shipped through this session.
 
 The operator runs two bots:
 
-1. **The Solana bot in THIS repo** (`tradingagents/solana_bot/`) — SOL/USDT
-   trend-pullback against Binance via ccxt. Paper-mode runs end-to-end; the
-   LiveEngine is half-built (constructor + open_long work, `manage()` raises
-   NotImplementedError). State persistence, JSONL trade journal, runner-lock,
-   AI filter via Claude, Telegram notifier, `TRADING_MODE` preflight, systemd
-   unit, deployment guide — all live in `tradingagents/solana_bot/`.
+1. **The Solana bot in THIS repo** (`tradingagents/solana_bot/`) — runs both
+   paper mode (Binance OHLCV, simulated fills) and live mode (Kraken via
+   ccxt, real orders). State persistence, JSONL trade journal, runner-lock,
+   AI filter via Claude (opt-in), Telegram notifier, `TRADING_MODE` preflight,
+   systemd unit, deployment guide, SIGTERM-cooperative shutdown — all live
+   in `tradingagents/solana_bot/`. LiveEngine fires all 8 SRE safety items:
+   confirm_trade_only_key acknowledgment, credentials smoke-test,
+   max_live_balance ceiling at construction AND per trade, precision rounding,
+   min-notional refusal, deterministic clientOrderIds, stop-failure→flatten
+   wrapper, actual-fill-price tracking.
 
 2. **A Kraken bot at `C:\Users\jay\OneDrive\Desktop\Kraken_bot\Kraken_Bot\`**
    on the operator's Windows machine — entry point `kraken_bot_v3.py`. NOT
@@ -75,7 +79,21 @@ not a bot bug. On the operator's real VPS the fetch succeeds.
 ## What to NEVER do without explicit operator approval
 
 - Flip `EXECUTE_TRADES = True` in `sol_bot/ai_filter.py`
-- Change `TRADING_MODE` from `paper` to anything else in `.env`
+- Change `TRADING_MODE` from `paper` to `live` in `.env` (operator's decision; multiple gates)
+- Set `CONFIRM_TRADE_ONLY_KEY=yes` in `.env` (this is the operator's manual API-permission acknowledgment)
+- Raise `BotConfig.max_live_balance` beyond $100 (the "tiny live capital only" invariant)
 - Add new package dependencies
 - Modify either bot's source to "help" without being asked
 - Echo API tokens or secrets in chat — never, even when pasted in conversation
+
+## The four gates between paper and live
+
+Live execution requires ALL of the following to be true simultaneously:
+
+1. `EXECUTE_TRADES = True` committed in `sol_bot/ai_filter.py` (source edit, git-visible)
+2. `TRADING_MODE=live` in `.env` (or shell env)
+3. `CONFIRM_TRADE_ONLY_KEY=yes` in `.env` (acknowledgment that API key has Trade only)
+4. `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` present in env
+5. Account quote balance ≤ `BotConfig.max_live_balance` ($100 default) — enforced at engine construction AND on every `open_long`
+
+Removing any one gate refuses to start. Plus the runtime gates: daily-loss kill switch, runner-lock, reconcile-on-startup drift check. Plus the in-trade gates: stop-failure→flatten, deterministic clientOrderIds for retry idempotency.

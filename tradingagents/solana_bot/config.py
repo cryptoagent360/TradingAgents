@@ -56,6 +56,20 @@ class BotConfig:
 
     taker_fee: float = 0.001
 
+    # Live-trading safety: refuse to construct LiveEngine if the account's
+    # quote-currency balance exceeds this. Forces "tiny live capital only"
+    # at the start — operator must raise this constant intentionally as
+    # confidence grows. Default $100. Ignored by PaperEngine.
+    max_live_balance: float = 100.0
+
+    # Live-trading safety: Kraken (and most exchanges) does not expose a
+    # programmatic permissions check the way Binance does. The strongest
+    # defense we can offer short of refusing to start is to require the
+    # operator to explicitly acknowledge "I have manually verified my API
+    # key has only Trade permission — no Withdraw, no Funds, no Account
+    # Management". LiveEngine refuses to instantiate unless this is True.
+    confirm_trade_only_key: bool = False
+
     home_dir: Path = field(default_factory=lambda: _HOME)
 
     @property
@@ -98,7 +112,7 @@ class BotConfig:
                 f"ema_fast ({self.ema_fast}) must be < ema_slow ({self.ema_slow})"
             )
         for name in ("atr_mult", "trail_atr_mult", "tp1_r", "tp2_r",
-                     "volume_spike_mult"):
+                     "volume_spike_mult", "max_live_balance"):
             v = getattr(self, name)
             if not _is_finite_positive(v):
                 raise BotConfigError(f"{name} must be positive and finite, got {v!r}")
